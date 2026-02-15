@@ -754,6 +754,20 @@ button:disabled {
   border: 1px solid var(--line);
 }
 
+.videoThumb {
+  width: 88px;
+  height: 50px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  background: linear-gradient(135deg, #1a2426 0%, #263436 100%);
+  flex-shrink: 0;
+}
+
+.videoThumb.is-hidden {
+  display: none;
+}
+
 .videoItem:hover {
   border-color: var(--mint);
 }
@@ -790,6 +804,12 @@ button:disabled {
 .videoBadge.quality {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-2);
+}
+
+.videoBadge.size {
+  background: rgba(17, 232, 164, 0.08);
+  color: var(--text-2);
+  text-transform: none;
 }
 
 .videoDownloadBtn {

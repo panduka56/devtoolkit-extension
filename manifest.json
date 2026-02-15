@@ -30,7 +30,6 @@
       "matches": ["<all_urls>"],
       "js": ["content-script.js"],
       "all_frames": true,
-      "exclude_matches": ["*://www.youtube.com/*"],
       "run_at": "document_start"
     }
   ],

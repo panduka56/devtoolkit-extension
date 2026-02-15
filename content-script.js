@@ -1126,29 +1126,146 @@ ${rows}
 
   // === Video Event Relay ===
 
+  function toAbsoluteHttpUrl(value) {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return '';
+    }
+    try {
+      const resolved = new URL(trimmed, window.location.href);
+      if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+        return resolved.href;
+      }
+      return '';
+    } catch {
+      return '';
+    }
+  }
+
+  function getPageThumbnailUrl() {
+    const ogImage =
+      document
+        .querySelector('meta[property="og:image"], meta[name="twitter:image"]')
+        ?.getAttribute('content') || '';
+    const ogUrl = toAbsoluteHttpUrl(ogImage);
+    if (ogUrl) {
+      return ogUrl;
+    }
+    const videoPoster = document.querySelector('video[poster]')?.getAttribute('poster') || '';
+    return toAbsoluteHttpUrl(videoPoster);
+  }
+
+  function collectDomVideoCandidates() {
+    const candidates = [];
+    const seen = new Set();
+    const fallbackThumb = getPageThumbnailUrl();
+    const pageTitle = document.title || 'video';
+    const mediaPattern = /\.(m3u8|mpd|mp4|webm|m4v|mov)(\?|$)/i;
+
+    function addCandidate(url, options = {}) {
+      const resolvedUrl = toAbsoluteHttpUrl(url);
+      if (!resolvedUrl || !mediaPattern.test(resolvedUrl)) {
+        return;
+      }
+      const quality = options.quality || 'N/A';
+      const playlist = Boolean(options.playlist) || /\.(m3u8|mpd)(\?|$)/i.test(resolvedUrl);
+      const key = `${resolvedUrl}|${quality}|${playlist ? '1' : '0'}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      candidates.push({
+        url: resolvedUrl,
+        quality,
+        fileName: options.fileName || pageTitle,
+        id: generateId(),
+        playlist,
+        thumbnailUrl: options.thumbnailUrl || fallbackThumb || '',
+      });
+    }
+
+    const videoElements = Array.from(document.querySelectorAll('video')).slice(0, 25);
+    for (const videoEl of videoElements) {
+      const quality = Number(videoEl.videoHeight) > 0 ? `${videoEl.videoHeight}p` : 'N/A';
+      const poster = toAbsoluteHttpUrl(videoEl.poster || '');
+      if (videoEl.currentSrc) {
+        addCandidate(videoEl.currentSrc, { quality, thumbnailUrl: poster });
+      }
+      if (videoEl.src) {
+        addCandidate(videoEl.src, { quality, thumbnailUrl: poster });
+      }
+      const sourceNodes = Array.from(videoEl.querySelectorAll('source[src]')).slice(0, 12);
+      for (const sourceEl of sourceNodes) {
+        addCandidate(sourceEl.src || sourceEl.getAttribute('src') || '', {
+          quality,
+          thumbnailUrl: poster,
+        });
+      }
+    }
+
+    const anchorNodes = Array.from(document.querySelectorAll('a[href]')).slice(0, 240);
+    for (const anchor of anchorNodes) {
+      const href = anchor.getAttribute('href') || '';
+      if (!mediaPattern.test(href)) {
+        continue;
+      }
+      addCandidate(href, { quality: 'N/A' });
+    }
+
+    return candidates;
+  }
+
+  function scanDomForVideosAndRelay() {
+    const candidates = collectDomVideoCandidates();
+    if (candidates.length) {
+      chrome.runtime.sendMessage({ message: 'add-video-links', videoLinks: candidates });
+    }
+    return candidates.length;
+  }
+
   window.addEventListener('videos-found', (event) => {
     if (!event.detail || !event.detail.length) return;
     const videoLinks = [];
+    const fallbackThumbnail = getPageThumbnailUrl();
     for (let i = 0; i < event.detail.length; i++) {
       const item = event.detail[i];
       if (Array.isArray(item)) {
         for (let j = 0; j < item.length; j++) {
           const v = item[j];
+          const normalizedUrl = toAbsoluteHttpUrl(v.url);
+          if (!normalizedUrl) continue;
           videoLinks.push({
-            url: v.url,
+            url: normalizedUrl,
             quality: v.quality || 'N/A',
             fileName: v.title || v.fileName || document.title,
             id: v.id || generateId(),
             playlist: v.playlist || false,
+            thumbnailUrl:
+              toAbsoluteHttpUrl(v.thumbnailUrl || v.thumbnail || '') ||
+              fallbackThumbnail ||
+              '',
+            sizeBytes: Number(v.sizeBytes || v.contentLength || v.filesize) || null,
+            contentType: typeof v.contentType === 'string' ? v.contentType : '',
           });
         }
       } else {
+        const normalizedUrl = toAbsoluteHttpUrl(item.url);
+        if (!normalizedUrl) continue;
         videoLinks.push({
-          url: item.url,
+          url: normalizedUrl,
           quality: item.quality || 'N/A',
           fileName: item.title || item.fileName || document.title,
           id: item.id || generateId(),
           playlist: item.playlist || false,
+          thumbnailUrl:
+            toAbsoluteHttpUrl(item.thumbnailUrl || item.thumbnail || '') ||
+            fallbackThumbnail ||
+            '',
+          sizeBytes: Number(item.sizeBytes || item.contentLength || item.filesize) || null,
+          contentType: typeof item.contentType === 'string' ? item.contentType : '',
         });
       }
     }
@@ -1189,6 +1306,12 @@ ${rows}
         format: 'ai-context-markdown',
         ...contextPayload,
       });
+      return;
+    }
+
+    if (message.type === 'SCAN_PAGE_VIDEOS') {
+      const count = scanDomForVideosAndRelay();
+      sendResponse({ ok: true, count });
       return;
     }
 
@@ -1247,4 +1370,11 @@ ${rows}
 
   injectPageLogger();
   injectWatcher();
+  setTimeout(() => {
+    try {
+      scanDomForVideosAndRelay();
+    } catch {
+      // Ignore scan errors.
+    }
+  }, 700);
 })();

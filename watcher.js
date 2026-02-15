@@ -109,6 +109,29 @@
     return results;
   }
 
+  function resolveUrl(baseUrl, maybeRelativeUrl) {
+    if (typeof maybeRelativeUrl !== 'string') {
+      return '';
+    }
+    const trimmed = maybeRelativeUrl.trim();
+    if (!trimmed) {
+      return '';
+    }
+    try {
+      return new URL(trimmed, baseUrl || document.location.href).href;
+    } catch {
+      return '';
+    }
+  }
+
+  function sanitizeQuality(value) {
+    if (typeof value !== 'string') {
+      return 'N/A';
+    }
+    const trimmed = value.trim();
+    return trimmed || 'N/A';
+  }
+
   // === Site-Specific Parsers (Inlined) ===
 
   // --- Instagram Parser ---
@@ -243,6 +266,109 @@
     },
   };
 
+  // --- YouTube Parser ---
+  const youtubeParser = {
+    origins: [/youtube\.com/, /googlevideo\.com/],
+    onLoad(responseText, requestUrl) {
+      if (
+        !responseText.includes('streamingData') &&
+        !responseText.includes('hlsManifestUrl') &&
+        !responseText.includes('dashManifestUrl')
+      ) {
+        return;
+      }
+
+      let data = null;
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        const cleaned = responseText.replace(/^[)\]\}'\s]+/, '');
+        try {
+          data = JSON.parse(cleaned);
+        } catch {
+          return;
+        }
+      }
+
+      const playerResponse = data?.streamingData
+        ? data
+        : data?.playerResponse?.streamingData
+          ? data.playerResponse
+          : null;
+      if (!playerResponse || !playerResponse.streamingData) {
+        return;
+      }
+
+      const title = playerResponse?.videoDetails?.title || document.title || '';
+      const thumbSet = playerResponse?.videoDetails?.thumbnail?.thumbnails;
+      const thumbnailUrl = Array.isArray(thumbSet) && thumbSet.length
+        ? thumbSet[thumbSet.length - 1].url || ''
+        : '';
+
+      const videos = [];
+      const formats = [];
+      if (Array.isArray(playerResponse.streamingData.formats)) {
+        formats.push(...playerResponse.streamingData.formats);
+      }
+      if (Array.isArray(playerResponse.streamingData.adaptiveFormats)) {
+        formats.push(...playerResponse.streamingData.adaptiveFormats);
+      }
+
+      for (let i = 0; i < formats.length; i++) {
+        const format = formats[i];
+        if (!format) continue;
+        const url = resolveUrl(requestUrl, format.url);
+        if (!url) continue;
+        const mimeType = typeof format.mimeType === 'string' ? format.mimeType : '';
+        if (mimeType.includes('audio/')) continue;
+        const contentLength = Number.parseInt(format.contentLength || '', 10);
+        const quality = sanitizeQuality(
+          format.qualityLabel || (format.height ? `${format.height}p` : format.quality)
+        );
+        videos.push({
+          fileName: title,
+          url,
+          quality,
+          thumbnailUrl,
+          contentType: mimeType.split(';')[0] || '',
+          sizeBytes: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null,
+        });
+      }
+
+      const hlsManifestUrl = resolveUrl(
+        requestUrl,
+        playerResponse.streamingData.hlsManifestUrl
+      );
+      if (hlsManifestUrl) {
+        videos.push({
+          fileName: title,
+          url: hlsManifestUrl,
+          quality: 'adaptive',
+          playlist: true,
+          thumbnailUrl,
+        });
+      }
+
+      const dashManifestUrl = resolveUrl(
+        requestUrl,
+        playerResponse.streamingData.dashManifestUrl
+      );
+      if (dashManifestUrl) {
+        videos.push({
+          fileName: title,
+          url: dashManifestUrl,
+          quality: 'adaptive',
+          playlist: true,
+          thumbnailUrl,
+        });
+      }
+
+      if (videos.length) {
+        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos }));
+      }
+    },
+  };
+
   // --- HLS Streaming Parser ---
   const hlsParser = {
     origins: ['hls.enjoy24cdn.com', '928hd.tv', 'showhd9.com'],
@@ -256,19 +382,20 @@
         const segments = responseText.split(/#EXT-X-STREAM-INF:/);
         for (let s = 0; s < segments.length; s++) {
           const segment = segments[s];
+          if (!segment.trim()) continue;
+          const lines = segment.trim().split('\n').map((line) => line.trim()).filter(Boolean);
           const entry = { url: '', quality: '', playlist: true, fileName: title, stream: true, id: generateId(), isAdditional: false };
-          const parts = segment.split(/\s|,/);
-          for (let p = 0; p < parts.length; p++) {
-            const part = parts[p];
-            try {
-              if (part.match('RESOLUTION=')) {
-                entry.quality = part.split('=')[1];
-                if (entry.quality) {
-                  entry.quality = entry.quality.split('x')[1] + 'p';
-                }
-              }
-            } catch (e) { /* ignore */ }
-            entry.url = part;
+          const infoLine = lines[0] || '';
+          const resolutionMatch = infoLine.match(/RESOLUTION=(\d+)x(\d+)/i);
+          if (resolutionMatch) {
+            entry.quality = `${resolutionMatch[2]}p`;
+          }
+          for (let l = 1; l < lines.length; l++) {
+            const line = lines[l];
+            if (!line.startsWith('#')) {
+              entry.url = resolveUrl(requestUrl, line);
+              break;
+            }
           }
           if (entry.url) {
             videos.push({ fileName: entry.fileName, url: entry.url, playlist: true, quality: entry.quality || 'N/A' });
@@ -501,6 +628,49 @@
     },
   };
 
+  // --- Generic media URL parser (JSON/text payloads) ---
+  const genericUrlParser = {
+    origins: [/.*/],
+    onLoad(responseText, requestUrl) {
+      if (
+        !responseText.includes('.m3u8') &&
+        !responseText.includes('.mpd') &&
+        !responseText.includes('.mp4') &&
+        !responseText.includes('.webm')
+      ) {
+        return;
+      }
+
+      const normalizedText = responseText
+        .replace(/\\u0026/g, '&')
+        .replace(/\\\//g, '/');
+      const matches = normalizedText.match(
+        /https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mpd|mp4|webm)(?:\?[^"'\\\s<>]*)?/gi
+      );
+      if (!matches || !matches.length) {
+        return;
+      }
+
+      const seen = new Set();
+      const videos = [];
+      for (let i = 0; i < matches.length && i < 60; i++) {
+        const resolved = resolveUrl(requestUrl, matches[i]);
+        if (!resolved || seen.has(resolved)) continue;
+        seen.add(resolved);
+        videos.push({
+          fileName: document.title || '',
+          url: resolved,
+          playlist: /\.m3u8(\?|$)|\.mpd(\?|$)/i.test(resolved),
+          quality: 'N/A',
+        });
+      }
+
+      if (videos.length) {
+        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos }));
+      }
+    },
+  };
+
   // --- Generic HLS/DASH Parser (catches any site) ---
   const genericStreamParser = {
     origins: [/.*/],
@@ -523,7 +693,7 @@
               if (match) quality = match[2] + 'p';
             }
             if (line.trim() && !line.startsWith('#')) {
-              url = line.trim();
+              url = resolveUrl(requestUrl, line.trim());
             }
           }
           if (url) {
@@ -550,9 +720,13 @@
             const bandwidth = rep.getAttribute('bandwidth');
             const baseUrl = rep.querySelector('BaseURL');
             if (baseUrl && baseUrl.textContent) {
+              const mediaUrl = resolveUrl(requestUrl, baseUrl.textContent);
+              if (!mediaUrl) {
+                continue;
+              }
               videos.push({
                 fileName: title,
-                url: baseUrl.textContent,
+                url: mediaUrl,
                 quality: height ? height + 'p' : 'N/A',
                 bandwidth: bandwidth ? parseInt(bandwidth) : null,
               });
@@ -570,6 +744,7 @@
   const parsers = [
     instagramParser,
     twitterParser,
+    youtubeParser,
     vimeoParser,
     hlsParser,
     redditParser,
@@ -577,6 +752,7 @@
     kickParser,
     pornhubParser,
     xvideosParser,
+    genericUrlParser,
     genericStreamParser, // Must be last
   ];
 

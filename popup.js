@@ -2178,7 +2178,161 @@ async function syncSelectedModelToStorage() {
 
 // === Video Panel Logic ===
 
-function renderVideoList(videos) {
+function formatVideoSize(bytes) {
+  const parsed = Number(bytes);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return '';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = parsed;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const rounded =
+    value >= 100 || unitIndex === 0 ? Math.round(value) : Number(value.toFixed(1));
+  return `${rounded} ${units[unitIndex]}`;
+}
+
+function sanitizeFileStem(name) {
+  if (typeof name !== 'string') {
+    return 'video';
+  }
+  const cleaned = name
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 120);
+  return cleaned || 'video';
+}
+
+function extractExtFromUrl(url) {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+    return match ? match[1] : '';
+  } catch {
+    return '';
+  }
+}
+
+function inferVideoFormat(video) {
+  if (video.playlist) {
+    return /\.mpd(\?|$)/i.test(video.url) ? 'DASH' : 'HLS';
+  }
+  if (/\.webm(\?|$)/i.test(video.url)) {
+    return 'WEBM';
+  }
+  if (/\.mov(\?|$)/i.test(video.url)) {
+    return 'MOV';
+  }
+  return 'MP4';
+}
+
+function inferDownloadExtension(video) {
+  if (video.playlist) {
+    return /\.mpd(\?|$)/i.test(video.url) ? 'mpd' : 'm3u8';
+  }
+  const extFromUrl = extractExtFromUrl(video.url);
+  if (extFromUrl) {
+    return extFromUrl;
+  }
+  if (typeof video.contentType === 'string' && video.contentType.includes('webm')) {
+    return 'webm';
+  }
+  return 'mp4';
+}
+
+function buildDownloadFilename(video) {
+  const ext = inferDownloadExtension(video);
+  const base = sanitizeFileStem(
+    video.fileName || (() => {
+      try {
+        return new URL(video.url).pathname.split('/').pop() || 'video';
+      } catch {
+        return 'video';
+      }
+    })()
+  );
+  if (base.toLowerCase().endsWith(`.${ext}`)) {
+    return base;
+  }
+  return `${base}.${ext}`;
+}
+
+function getVideoSizeLabel(video) {
+  const calculated = formatVideoSize(video.sizeBytes);
+  if (calculated) {
+    return calculated;
+  }
+  if (typeof video.sizeText === 'string' && video.sizeText.trim()) {
+    return video.sizeText.trim();
+  }
+  return video.playlist ? 'Stream playlist' : 'Size unknown';
+}
+
+function applyMetadataToVideoItem(item, metadata) {
+  if (!item || !metadata) {
+    return;
+  }
+  const thumb = item.querySelector('.videoThumb');
+  if (
+    thumb &&
+    metadata.thumbnailUrl &&
+    typeof metadata.thumbnailUrl === 'string' &&
+    !thumb.src
+  ) {
+    thumb.src = metadata.thumbnailUrl;
+    thumb.classList.remove('is-hidden');
+  }
+
+  const sizeBadge = item.querySelector('.videoBadge.size');
+  if (sizeBadge) {
+    const text =
+      metadata.sizeText ||
+      formatVideoSize(metadata.sizeBytes) ||
+      (metadata.playlist ? 'Stream playlist' : 'Size unknown');
+    sizeBadge.textContent = text;
+  }
+}
+
+async function hydrateVideoMetadata(tabId, video, item) {
+  if (!Number.isInteger(tabId) || !video?.url || !item) {
+    return;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'GET_VIDEO_METADATA',
+      tabId,
+      url: video.url,
+    });
+    if (response?.ok && response.metadata) {
+      applyMetadataToVideoItem(item, response.metadata);
+    }
+  } catch {
+    // Metadata hydration is best-effort.
+  }
+}
+
+async function triggerVideoScan(tabId) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await withTimeout(
+        chrome.tabs.sendMessage(tabId, { type: 'SCAN_PAGE_VIDEOS' }),
+        3000
+      );
+      return;
+    } catch (error) {
+      if (!isNoReceiverError(error)) {
+        throw error;
+      }
+      await ensureContentScriptLoaded(tabId);
+    }
+  }
+}
+
+function renderVideoList(videos, tabId) {
   videoListEl.innerHTML = '';
   if (!videos || videos.length === 0) {
     videoListEl.innerHTML = '<p class="hint">No videos detected on this page.</p>';
@@ -2191,6 +2345,17 @@ function renderVideoList(videos) {
   for (const video of videos) {
     const item = document.createElement('div');
     item.className = 'videoItem';
+
+    const thumb = document.createElement('img');
+    thumb.className = 'videoThumb';
+    thumb.alt = 'Video thumbnail';
+    thumb.loading = 'lazy';
+    if (video.thumbnailUrl) {
+      thumb.src = video.thumbnailUrl;
+    } else {
+      thumb.classList.add('is-hidden');
+    }
+    item.appendChild(thumb);
 
     const info = document.createElement('div');
     info.className = 'videoInfo';
@@ -2206,7 +2371,7 @@ function renderVideoList(videos) {
 
     const formatBadge = document.createElement('span');
     formatBadge.className = 'videoBadge';
-    formatBadge.textContent = video.playlist ? 'HLS' : (video.url.includes('.webm') ? 'WEBM' : 'MP4');
+    formatBadge.textContent = inferVideoFormat(video);
     meta.appendChild(formatBadge);
 
     if (video.quality && video.quality !== 'N/A') {
@@ -2215,6 +2380,11 @@ function renderVideoList(videos) {
       qualityBadge.textContent = video.quality;
       meta.appendChild(qualityBadge);
     }
+
+    const sizeBadge = document.createElement('span');
+    sizeBadge.className = 'videoBadge size';
+    sizeBadge.textContent = getVideoSizeLabel(video);
+    meta.appendChild(sizeBadge);
 
     info.appendChild(meta);
     item.appendChild(info);
@@ -2226,6 +2396,8 @@ function renderVideoList(videos) {
     item.appendChild(dlBtn);
 
     videoListEl.appendChild(item);
+
+    void hydrateVideoMetadata(tabId, video, item);
   }
 
   setVideoStatus(`${videos.length} video(s) detected.`, 'success');
@@ -2236,10 +2408,12 @@ async function downloadVideo(video) {
     const response = await chrome.runtime.sendMessage({
       type: 'DOWNLOAD_VIDEO',
       url: video.url,
-      filename: video.fileName ? `${video.fileName}.mp4` : undefined,
+      filename: buildDownloadFilename(video),
     });
     if (response?.ok) {
       setVideoStatus('Download started.', 'success');
+    } else {
+      throw new Error(response?.error || 'Download was rejected by the browser.');
     }
   } catch (error) {
     setVideoStatus(`Download failed: ${error.message}`, 'error');
@@ -2266,12 +2440,18 @@ async function downloadAllVideos() {
 async function refreshVideoList() {
   try {
     const activeTab = await getActiveTabOrThrow();
+    try {
+      await triggerVideoScan(activeTab.id);
+      await wait(220);
+    } catch {
+      // Keep going with cached detections from background storage.
+    }
     const response = await chrome.runtime.sendMessage({
       type: 'GET_TAB_VIDEOS',
       tabId: activeTab.id,
     });
     if (response?.ok) {
-      renderVideoList(response.videos);
+      renderVideoList(response.videos, activeTab.id);
     }
   } catch (error) {
     setVideoStatus(error.message, 'error');

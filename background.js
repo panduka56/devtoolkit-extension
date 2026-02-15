@@ -5,40 +5,444 @@ import {
   parseAiResponse,
 } from './lib/ai-providers.js';
 
-// === Video Link Storage (per tab) ===
+// === Video Link Storage (per tab, persisted across worker restarts) ===
 
-const tabVideoData = {};
+const TAB_VIDEO_DATA_KEY = 'tabVideoDataV1';
+const VIDEO_METADATA_TIMEOUT_MS = 8000;
+const videoMetadataInflight = new Map();
 
-function getTabVideos(tabId) {
-  if (!tabVideoData[tabId]) {
-    tabVideoData[tabId] = { videos: [], badge: 0 };
-  }
-  return tabVideoData[tabId];
+let tabVideoDataCache = null;
+let tabVideoMutationQueue = Promise.resolve();
+
+function getVideoStorageArea() {
+  return chrome.storage.session || chrome.storage.local;
 }
 
-function addVideoLinks(tabId, videoLinks) {
-  const tab = getTabVideos(tabId);
-  for (const link of videoLinks) {
-    if (!tab.videos.some(v => v.url === link.url)) {
-      tab.videos.push(link);
+function normalizeTabId(tabId) {
+  const parsed = Number(tabId);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return '';
+  }
+  return String(parsed);
+}
+
+function normalizeHttpUrl(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.href;
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+function asPositiveInt(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
+function sanitizeFileName(input) {
+  if (typeof input !== 'string') {
+    return '';
+  }
+  const trimmed = input
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 120);
+  return trimmed;
+}
+
+function extractExtFromUrl(url) {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+    return match ? match[1] : '';
+  } catch {
+    return '';
+  }
+}
+
+function isPlaylistUrl(url) {
+  return /\.m3u8(\?|$)/i.test(url) || /\.mpd(\?|$)/i.test(url);
+}
+
+function formatBytes(bytes) {
+  const num = asPositiveInt(bytes);
+  if (!num) {
+    return '';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = num;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  const rounded =
+    value >= 100 || idx === 0 ? Math.round(value) : Number(value.toFixed(1));
+  return `${rounded} ${units[idx]}`;
+}
+
+function buildVideoKey(video) {
+  return `${video.url}|${video.quality || 'N/A'}|${video.playlist ? '1' : '0'}`;
+}
+
+function normalizeVideoLink(link) {
+  const url = normalizeHttpUrl(link?.url);
+  if (!url) {
+    return null;
+  }
+  const sizeBytes = asPositiveInt(
+    link?.sizeBytes ?? link?.contentLength ?? link?.filesize ?? null
+  );
+  const extFromUrl = extractExtFromUrl(url);
+  const playlist = Boolean(link?.playlist) || isPlaylistUrl(url);
+  const fileName = sanitizeFileName(link?.fileName || link?.title || 'video');
+
+  return {
+    id:
+      typeof link?.id === 'string' && link.id.trim()
+        ? link.id.trim()
+        : `v_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`,
+    url,
+    quality:
+      typeof link?.quality === 'string' && link.quality.trim()
+        ? link.quality.trim()
+        : 'N/A',
+    fileName: fileName || 'video',
+    playlist,
+    thumbnailUrl: normalizeHttpUrl(link?.thumbnailUrl) || '',
+    sizeBytes,
+    sizeText: sizeBytes ? formatBytes(sizeBytes) : '',
+    contentType:
+      typeof link?.contentType === 'string' ? link.contentType.trim() : '',
+    ext: extFromUrl || (playlist ? (url.includes('.mpd') ? 'mpd' : 'm3u8') : ''),
+    lastSeenAt: Date.now(),
+  };
+}
+
+function mergeVideoLink(existing, incoming) {
+  const nextSizeBytes = incoming.sizeBytes || existing.sizeBytes || null;
+  return {
+    ...existing,
+    ...incoming,
+    fileName: incoming.fileName || existing.fileName || 'video',
+    thumbnailUrl: incoming.thumbnailUrl || existing.thumbnailUrl || '',
+    sizeBytes: nextSizeBytes,
+    sizeText:
+      incoming.sizeText || existing.sizeText || (nextSizeBytes ? formatBytes(nextSizeBytes) : ''),
+    contentType: incoming.contentType || existing.contentType || '',
+    ext: incoming.ext || existing.ext || '',
+    lastSeenAt: Date.now(),
+  };
+}
+
+async function loadTabVideoData() {
+  if (tabVideoDataCache && typeof tabVideoDataCache === 'object') {
+    return tabVideoDataCache;
+  }
+  const storageArea = getVideoStorageArea();
+  const stored = await storageArea.get(TAB_VIDEO_DATA_KEY);
+  const parsed = stored[TAB_VIDEO_DATA_KEY];
+  tabVideoDataCache =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  return tabVideoDataCache;
+}
+
+async function saveTabVideoData(nextData) {
+  tabVideoDataCache = nextData;
+  const storageArea = getVideoStorageArea();
+  await storageArea.set({ [TAB_VIDEO_DATA_KEY]: nextData });
+}
+
+function runVideoMutation(task) {
+  const run = tabVideoMutationQueue.then(task, task);
+  tabVideoMutationQueue = run.catch(() => {});
+  return run;
+}
+
+async function setBadgeForTab(tabId, count) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+  try {
+    await chrome.action.setBadgeText({
+      text: count > 0 ? String(count) : '',
+      tabId,
+    });
+    if (count > 0) {
+      await chrome.action.setBadgeBackgroundColor({
+        color: '#11e8a4',
+        tabId,
+      });
+    }
+  } catch {
+    // Tab can disappear during async updates.
+  }
+}
+
+async function readTabVideos(tabId) {
+  const tabKey = normalizeTabId(tabId);
+  if (!tabKey) {
+    return { videos: [], badge: 0 };
+  }
+  const allData = await loadTabVideoData();
+  const current = allData[tabKey];
+  if (!current || !Array.isArray(current.videos)) {
+    return { videos: [], badge: 0 };
+  }
+  return {
+    videos: current.videos,
+    badge: Number.isFinite(current.badge) ? current.badge : current.videos.length,
+  };
+}
+
+async function addVideoLinks(tabId, videoLinks) {
+  if (!Number.isInteger(tabId) || !Array.isArray(videoLinks) || videoLinks.length === 0) {
+    return;
+  }
+
+  const tabKey = normalizeTabId(tabId);
+  if (!tabKey) {
+    return;
+  }
+
+  let nextBadge = 0;
+  await runVideoMutation(async () => {
+    const allData = await loadTabVideoData();
+    const current = allData[tabKey] && Array.isArray(allData[tabKey].videos)
+      ? allData[tabKey]
+      : { videos: [], badge: 0 };
+
+    const merged = new Map();
+    for (const existing of current.videos) {
+      if (!existing || typeof existing !== 'object') continue;
+      const normalizedExisting = normalizeVideoLink(existing);
+      if (!normalizedExisting) continue;
+      merged.set(buildVideoKey(normalizedExisting), normalizedExisting);
+    }
+
+    for (const rawLink of videoLinks) {
+      const normalized = normalizeVideoLink(rawLink);
+      if (!normalized) continue;
+      const key = buildVideoKey(normalized);
+      const existing = merged.get(key);
+      merged.set(key, existing ? mergeVideoLink(existing, normalized) : normalized);
+    }
+
+    const nextVideos = Array.from(merged.values());
+    nextBadge = nextVideos.length;
+    allData[tabKey] = {
+      videos: nextVideos,
+      badge: nextVideos.length,
+      updatedAt: Date.now(),
+    };
+
+    await saveTabVideoData(allData);
+  });
+  await setBadgeForTab(tabId, nextBadge);
+}
+
+async function clearTabVideos(tabId) {
+  const tabKey = normalizeTabId(tabId);
+  if (!tabKey) {
+    return;
+  }
+  await runVideoMutation(async () => {
+    const allData = await loadTabVideoData();
+    if (allData[tabKey]) {
+      delete allData[tabKey];
+      await saveTabVideoData(allData);
+    }
+  });
+  await setBadgeForTab(Number(tabId), 0);
+}
+
+function parseContentLength(headers) {
+  const header = headers.get('content-length');
+  if (!header) {
+    return null;
+  }
+  const parsed = Number.parseInt(header, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseRangeLength(headers) {
+  const contentRange = headers.get('content-range');
+  if (!contentRange) {
+    return null;
+  }
+  const match = contentRange.match(/\/(\d+)$/);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = VIDEO_METADATA_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function fetchVideoMetadataFromNetwork(url) {
+  let contentType = '';
+  let sizeBytes = null;
+
+  try {
+    const headResp = await fetchWithTimeout(url, { method: 'HEAD' });
+    contentType = headResp.headers.get('content-type') || '';
+    if (headResp.ok || headResp.status === 405) {
+      sizeBytes = parseContentLength(headResp.headers);
+    }
+  } catch {
+    // Fallback to range request.
+  }
+
+  if (!sizeBytes) {
+    try {
+      const rangeResp = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+      });
+      if (rangeResp.ok || rangeResp.status === 206) {
+        contentType = contentType || rangeResp.headers.get('content-type') || '';
+        sizeBytes =
+          parseRangeLength(rangeResp.headers) || parseContentLength(rangeResp.headers);
+      }
+    } catch {
+      // Keep metadata empty when source does not expose size.
     }
   }
-  tab.badge = tab.videos.length;
-  chrome.action.setBadgeText({ text: tab.badge > 0 ? String(tab.badge) : '', tabId });
-  chrome.action.setBadgeBackgroundColor({ color: '#11e8a4', tabId });
+
+  return {
+    sizeBytes: asPositiveInt(sizeBytes),
+    contentType,
+  };
+}
+
+function buildVideoMetadata(video, fallbackUrl = '') {
+  const url = video?.url || fallbackUrl;
+  const playlist = Boolean(video?.playlist) || isPlaylistUrl(url);
+  const sizeBytes = asPositiveInt(video?.sizeBytes);
+  return {
+    playlist,
+    ext: video?.ext || extractExtFromUrl(url),
+    contentType: video?.contentType || '',
+    thumbnailUrl: video?.thumbnailUrl || '',
+    sizeBytes,
+    sizeText: sizeBytes
+      ? formatBytes(sizeBytes)
+      : playlist
+        ? 'Stream playlist'
+        : '',
+  };
+}
+
+async function getVideoMetadata(tabId, url) {
+  const normalizedUrl = normalizeHttpUrl(url);
+  if (!normalizedUrl) {
+    throw new Error('Invalid media URL.');
+  }
+  const tabKey = normalizeTabId(tabId);
+  const allData = await loadTabVideoData();
+  const tab = tabKey ? allData[tabKey] : null;
+  const videos = Array.isArray(tab?.videos) ? tab.videos : [];
+  const index = videos.findIndex((video) => video && video.url === normalizedUrl);
+  const existingVideo = index >= 0 ? videos[index] : null;
+  const existingMetadata = buildVideoMetadata(existingVideo, normalizedUrl);
+
+  if (existingMetadata.playlist) {
+    return existingMetadata;
+  }
+
+  if (existingMetadata.sizeBytes && existingMetadata.contentType) {
+    return existingMetadata;
+  }
+
+  let inflight = videoMetadataInflight.get(normalizedUrl);
+  if (!inflight) {
+    inflight = fetchVideoMetadataFromNetwork(normalizedUrl).finally(() => {
+      videoMetadataInflight.delete(normalizedUrl);
+    });
+    videoMetadataInflight.set(normalizedUrl, inflight);
+  }
+  const fetched = await inflight;
+
+  const nextSizeBytes = fetched.sizeBytes || existingMetadata.sizeBytes || null;
+  const nextContentType = fetched.contentType || existingMetadata.contentType || '';
+  const nextMetadata = {
+    ...existingMetadata,
+    sizeBytes: nextSizeBytes,
+    sizeText: nextSizeBytes ? formatBytes(nextSizeBytes) : '',
+    contentType: nextContentType,
+  };
+
+  if (index >= 0) {
+    await runVideoMutation(async () => {
+      const freshAllData = await loadTabVideoData();
+      const freshTab = freshAllData[tabKey];
+      if (!freshTab || !Array.isArray(freshTab.videos)) {
+        return;
+      }
+      const freshIndex = freshTab.videos.findIndex(
+        (video) => video && video.url === normalizedUrl
+      );
+      if (freshIndex < 0) {
+        return;
+      }
+      const freshVideos = freshTab.videos.slice();
+      freshVideos[freshIndex] = {
+        ...freshVideos[freshIndex],
+        sizeBytes: nextMetadata.sizeBytes,
+        sizeText: nextMetadata.sizeText,
+        contentType: nextMetadata.contentType,
+      };
+      freshAllData[tabKey] = {
+        ...freshTab,
+        videos: freshVideos,
+        badge: freshVideos.length,
+        updatedAt: Date.now(),
+      };
+      await saveTabVideoData(freshAllData);
+    });
+  }
+
+  return nextMetadata;
 }
 
 // Clear videos when tab navigates
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
-    tabVideoData[tabId] = { videos: [], badge: 0 };
-    chrome.action.setBadgeText({ text: '', tabId });
+    void clearTabVideos(tabId);
   }
 });
 
 // Clean up on tab close
 chrome.tabs.onRemoved.addListener((tabId) => {
-  delete tabVideoData[tabId];
+  void clearTabVideos(tabId);
 });
 
 // === AI Config Helpers (ported from Console Signal background.js) ===
@@ -280,24 +684,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.message === 'add-video-links') {
         const tabId = sender.tab?.id;
         if (tabId && message.videoLinks) {
-          addVideoLinks(tabId, message.videoLinks);
+          await addVideoLinks(tabId, message.videoLinks);
         }
         sendResponse({ ok: true });
         return;
       }
 
       if (message.type === 'GET_TAB_VIDEOS') {
-        const tabId = message.tabId;
-        const data = tabVideoData[tabId] || { videos: [], badge: 0 };
+        const tabId = Number(message.tabId);
+        const data = await readTabVideos(tabId);
+        await setBadgeForTab(tabId, data.badge);
         sendResponse({ ok: true, videos: data.videos });
         return;
       }
 
+      if (message.type === 'GET_VIDEO_METADATA') {
+        const tabId =
+          Number.isInteger(Number(message.tabId))
+            ? Number(message.tabId)
+            : sender.tab?.id;
+        const metadata = await getVideoMetadata(tabId, message.url);
+        sendResponse({ ok: true, metadata });
+        return;
+      }
+
       if (message.type === 'DOWNLOAD_VIDEO') {
+        if (!message.url || typeof message.url !== 'string') {
+          throw new Error('No download URL provided.');
+        }
         chrome.downloads.download({
           url: message.url,
           filename: message.filename || undefined,
+          conflictAction: 'uniquify',
         }, (downloadId) => {
+          if (chrome.runtime.lastError || !Number.isInteger(downloadId)) {
+            sendResponse({
+              ok: false,
+              error:
+                chrome.runtime.lastError?.message ||
+                'Download could not be started for this URL.',
+            });
+            return;
+          }
           sendResponse({ ok: true, downloadId });
         });
         return;
