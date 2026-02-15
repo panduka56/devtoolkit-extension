@@ -806,6 +806,11 @@ button:disabled {
   color: var(--text-2);
 }
 
+.videoBadge.primary {
+  background: rgba(37, 244, 209, 0.2);
+  color: var(--mint-soft);
+}
+
 .videoBadge.size {
   background: rgba(17, 232, 164, 0.08);
   color: var(--text-2);

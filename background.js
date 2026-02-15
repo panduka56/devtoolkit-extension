@@ -97,7 +97,149 @@ function formatBytes(bytes) {
 }
 
 function buildVideoKey(video) {
-  return `${video.url}|${video.quality || 'N/A'}|${video.playlist ? '1' : '0'}`;
+  const canonical = canonicalVideoIdentity(video);
+  return `${canonical}|${video.playlist ? '1' : '0'}|${video.hasAudio === false ? '0' : '1'}`;
+}
+
+function qualityToPixels(quality) {
+  if (typeof quality !== 'string') {
+    return 0;
+  }
+  const pMatch = quality.match(/(\d{3,4})p/i);
+  if (pMatch) {
+    return Number.parseInt(pMatch[1], 10) || 0;
+  }
+  const rMatch = quality.match(/(\d{3,4})x(\d{3,4})/i);
+  if (rMatch) {
+    return Number.parseInt(rMatch[2], 10) || 0;
+  }
+  return 0;
+}
+
+function isYoutubeLikeHost(hostname) {
+  return (
+    hostname.includes('youtube.com') ||
+    hostname.includes('googlevideo.com') ||
+    hostname.includes('ytimg.com')
+  );
+}
+
+function canonicalVideoIdentity(video) {
+  if (!video?.url) {
+    return '';
+  }
+  try {
+    const parsed = new URL(video.url);
+    const host = parsed.hostname.toLowerCase();
+    if (isYoutubeLikeHost(host)) {
+      const itag = parsed.searchParams.get('itag') || '';
+      const id = parsed.searchParams.get('id') || '';
+      const mime = parsed.searchParams.get('mime') || '';
+      return `${host}${parsed.pathname}|itag=${itag}|id=${id}|mime=${mime}`;
+    }
+    return `${host}${parsed.pathname}`;
+  } catch {
+    return video.url;
+  }
+}
+
+function looksLikeJunkVideo(video) {
+  if (!video?.url) {
+    return true;
+  }
+  const url = video.url.toLowerCase();
+  if (
+    /(?:thumbnail|storyboard|sprite|preview|poster|analytics|tracking|telemetry|subtitle|caption|vtt)/i.test(
+      url
+    )
+  ) {
+    return true;
+  }
+  if (/[?&](?:mime=audio|type=audio|audio=1|is_audio=1)/i.test(url)) {
+    return true;
+  }
+  if (typeof video.contentType === 'string' && /audio\//i.test(video.contentType)) {
+    return true;
+  }
+  return false;
+}
+
+function scoreVideoCandidate(video) {
+  let score = 0;
+  if (video.isPrimary) score += 12000;
+  if (video.hasAudio === true) score += 1500;
+  if (video.hasAudio === false) score -= 1000;
+  if (!video.playlist) score += 500;
+  if (video.playlist) score -= 250;
+  score += Math.min(qualityToPixels(video.quality), 2200);
+  if (video.sizeBytes) {
+    score += Math.min(Math.floor(video.sizeBytes / (1024 * 1024)), 600);
+  }
+  if (typeof video.source === 'string' && video.source) {
+    score += 250;
+  }
+  if (video.requiresMux) {
+    score -= 900;
+  }
+  if (looksLikeJunkVideo(video)) {
+    score -= 20000;
+  }
+  return score;
+}
+
+function curateVideosForDisplay(videos) {
+  if (!Array.isArray(videos) || videos.length === 0) {
+    return [];
+  }
+
+  const deduped = new Map();
+  for (const candidate of videos) {
+    if (!candidate || !candidate.url || looksLikeJunkVideo(candidate)) {
+      continue;
+    }
+    const key = buildVideoKey(candidate);
+    const existing = deduped.get(key);
+    if (!existing || scoreVideoCandidate(candidate) > scoreVideoCandidate(existing)) {
+      deduped.set(key, candidate);
+    }
+  }
+
+  let candidates = Array.from(deduped.values());
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const allYoutube = candidates.every((video) => {
+    try {
+      return isYoutubeLikeHost(new URL(video.url).hostname.toLowerCase());
+    } catch {
+      return false;
+    }
+  });
+
+  if (allYoutube) {
+    const progressive = candidates.filter(
+      (video) => video.playlist !== true && video.hasAudio === true
+    );
+    if (progressive.length > 0) {
+      candidates = progressive;
+    } else {
+      const fallback = candidates
+        .filter((video) => video.playlist !== true)
+        .sort((a, b) => scoreVideoCandidate(b) - scoreVideoCandidate(a));
+      candidates = fallback.slice(0, 3).map((video) => ({
+        ...video,
+        requiresMux: true,
+      }));
+    }
+  }
+
+  candidates.sort((a, b) => scoreVideoCandidate(b) - scoreVideoCandidate(a));
+  const limit = allYoutube ? 5 : 12;
+  return candidates.slice(0, limit).map((video, idx) => ({
+    ...video,
+    isPrimary: idx === 0,
+  }));
 }
 
 function normalizeVideoLink(link) {
@@ -130,6 +272,11 @@ function normalizeVideoLink(link) {
     contentType:
       typeof link?.contentType === 'string' ? link.contentType.trim() : '',
     ext: extFromUrl || (playlist ? (url.includes('.mpd') ? 'mpd' : 'm3u8') : ''),
+    source: typeof link?.source === 'string' ? link.source.trim() : '',
+    hasAudio:
+      link?.hasAudio === true ? true : link?.hasAudio === false ? false : null,
+    requiresMux: Boolean(link?.requiresMux),
+    isPrimary: Boolean(link?.isPrimary),
     lastSeenAt: Date.now(),
   };
 }
@@ -146,6 +293,13 @@ function mergeVideoLink(existing, incoming) {
       incoming.sizeText || existing.sizeText || (nextSizeBytes ? formatBytes(nextSizeBytes) : ''),
     contentType: incoming.contentType || existing.contentType || '',
     ext: incoming.ext || existing.ext || '',
+    source: incoming.source || existing.source || '',
+    hasAudio:
+      incoming.hasAudio === true || incoming.hasAudio === false
+        ? incoming.hasAudio
+        : existing.hasAudio,
+    requiresMux: Boolean(incoming.requiresMux || existing.requiresMux),
+    isPrimary: Boolean(incoming.isPrimary || existing.isPrimary),
     lastSeenAt: Date.now(),
   };
 }
@@ -204,9 +358,10 @@ async function readTabVideos(tabId) {
   if (!current || !Array.isArray(current.videos)) {
     return { videos: [], badge: 0 };
   }
+  const curated = curateVideosForDisplay(current.videos);
   return {
-    videos: current.videos,
-    badge: Number.isFinite(current.badge) ? current.badge : current.videos.length,
+    videos: curated,
+    badge: curated.length,
   };
 }
 
@@ -244,10 +399,10 @@ async function addVideoLinks(tabId, videoLinks) {
     }
 
     const nextVideos = Array.from(merged.values());
-    nextBadge = nextVideos.length;
+    nextBadge = curateVideosForDisplay(nextVideos).length;
     allData[tabKey] = {
       videos: nextVideos,
-      badge: nextVideos.length,
+      badge: nextBadge,
       updatedAt: Date.now(),
     };
 

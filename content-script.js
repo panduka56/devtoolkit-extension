@@ -1184,35 +1184,49 @@ ${rows}
         id: generateId(),
         playlist,
         thumbnailUrl: options.thumbnailUrl || fallbackThumb || '',
+        source: options.source || 'dom',
+        hasAudio:
+          options.hasAudio === true || options.hasAudio === false
+            ? options.hasAudio
+            : null,
+        isPrimary: Boolean(options.isPrimary),
       });
     }
 
     const videoElements = Array.from(document.querySelectorAll('video')).slice(0, 25);
-    for (const videoEl of videoElements) {
+    for (let idx = 0; idx < videoElements.length; idx++) {
+      const videoEl = videoElements[idx];
       const quality = Number(videoEl.videoHeight) > 0 ? `${videoEl.videoHeight}p` : 'N/A';
       const poster = toAbsoluteHttpUrl(videoEl.poster || '');
+      const hasAudioTrack =
+        Number(videoEl.mozHasAudio) > 0 ||
+        Boolean(videoEl.webkitAudioDecodedByteCount > 0) ||
+        Boolean(videoEl.audioTracks && videoEl.audioTracks.length > 0);
       if (videoEl.currentSrc) {
-        addCandidate(videoEl.currentSrc, { quality, thumbnailUrl: poster });
+        addCandidate(videoEl.currentSrc, {
+          quality,
+          thumbnailUrl: poster,
+          hasAudio: hasAudioTrack,
+          isPrimary: idx === 0,
+        });
       }
       if (videoEl.src) {
-        addCandidate(videoEl.src, { quality, thumbnailUrl: poster });
+        addCandidate(videoEl.src, {
+          quality,
+          thumbnailUrl: poster,
+          hasAudio: hasAudioTrack,
+          isPrimary: idx === 0,
+        });
       }
       const sourceNodes = Array.from(videoEl.querySelectorAll('source[src]')).slice(0, 12);
       for (const sourceEl of sourceNodes) {
         addCandidate(sourceEl.src || sourceEl.getAttribute('src') || '', {
           quality,
           thumbnailUrl: poster,
+          hasAudio: hasAudioTrack,
+          isPrimary: idx === 0,
         });
       }
-    }
-
-    const anchorNodes = Array.from(document.querySelectorAll('a[href]')).slice(0, 240);
-    for (const anchor of anchorNodes) {
-      const href = anchor.getAttribute('href') || '';
-      if (!mediaPattern.test(href)) {
-        continue;
-      }
-      addCandidate(href, { quality: 'N/A' });
     }
 
     return candidates;
@@ -1249,6 +1263,11 @@ ${rows}
               '',
             sizeBytes: Number(v.sizeBytes || v.contentLength || v.filesize) || null,
             contentType: typeof v.contentType === 'string' ? v.contentType : '',
+            source: typeof v.source === 'string' ? v.source : '',
+            hasAudio:
+              v.hasAudio === true || v.hasAudio === false ? v.hasAudio : null,
+            requiresMux: Boolean(v.requiresMux),
+            isPrimary: Boolean(v.isPrimary),
           });
         }
       } else {
@@ -1266,6 +1285,11 @@ ${rows}
             '',
           sizeBytes: Number(item.sizeBytes || item.contentLength || item.filesize) || null,
           contentType: typeof item.contentType === 'string' ? item.contentType : '',
+          source: typeof item.source === 'string' ? item.source : '',
+          hasAudio:
+            item.hasAudio === true || item.hasAudio === false ? item.hasAudio : null,
+          requiresMux: Boolean(item.requiresMux),
+          isPrimary: Boolean(item.isPrimary),
         });
       }
     }

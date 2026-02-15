@@ -132,6 +132,21 @@
     return trimmed || 'N/A';
   }
 
+  function qualityToPixels(quality) {
+    if (typeof quality !== 'string') {
+      return 0;
+    }
+    const pMatch = quality.match(/(\d{3,4})p/i);
+    if (pMatch) {
+      return Number.parseInt(pMatch[1], 10) || 0;
+    }
+    const rMatch = quality.match(/(\d{3,4})x(\d{3,4})/i);
+    if (rMatch) {
+      return Number.parseInt(rMatch[2], 10) || 0;
+    }
+    return 0;
+  }
+
   // === Site-Specific Parsers (Inlined) ===
 
   // --- Instagram Parser ---
@@ -314,53 +329,96 @@
         formats.push(...playerResponse.streamingData.adaptiveFormats);
       }
 
+      function youtubeScore(format) {
+        const height = Number(format.height) || 0;
+        const bitrate = Number(format.bitrate) || 0;
+        return height * 100000 + bitrate;
+      }
+
+      const progressive = [];
+      const adaptive = [];
+      const seenItags = new Set();
+
       for (let i = 0; i < formats.length; i++) {
         const format = formats[i];
         if (!format) continue;
-        const url = resolveUrl(requestUrl, format.url);
+        const url = resolveUrl(requestUrl, format.url || '');
         if (!url) continue;
         const mimeType = typeof format.mimeType === 'string' ? format.mimeType : '';
-        if (mimeType.includes('audio/')) continue;
+        if (!mimeType.includes('video/')) continue;
+        const itag = String(format.itag || '');
+        if (itag && seenItags.has(itag)) continue;
+        if (itag) seenItags.add(itag);
+        const hasAudio = Boolean(format.audioQuality || format.audioSampleRate);
         const contentLength = Number.parseInt(format.contentLength || '', 10);
         const quality = sanitizeQuality(
           format.qualityLabel || (format.height ? `${format.height}p` : format.quality)
         );
-        videos.push({
+
+        const candidate = {
           fileName: title,
           url,
           quality,
           thumbnailUrl,
           contentType: mimeType.split(';')[0] || '',
           sizeBytes: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null,
+          source: 'youtube',
+          hasAudio,
+          requiresMux: !hasAudio,
+          itag,
+          score: youtubeScore(format),
+        };
+
+        if (hasAudio) {
+          progressive.push(candidate);
+        } else {
+          adaptive.push(candidate);
+        }
+      }
+
+      progressive.sort((a, b) => (b.score || 0) - (a.score || 0));
+      adaptive.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+      if (progressive.length > 0) {
+        for (let i = 0; i < Math.min(progressive.length, 4); i++) {
+          videos.push({
+            ...progressive[i],
+            isPrimary: i === 0,
+          });
+        }
+      } else if (adaptive.length > 0) {
+        videos.push({
+          ...adaptive[0],
+          isPrimary: true,
+          requiresMux: true,
         });
       }
 
-      const hlsManifestUrl = resolveUrl(
-        requestUrl,
-        playerResponse.streamingData.hlsManifestUrl
-      );
-      if (hlsManifestUrl) {
-        videos.push({
-          fileName: title,
-          url: hlsManifestUrl,
-          quality: 'adaptive',
-          playlist: true,
-          thumbnailUrl,
-        });
-      }
-
-      const dashManifestUrl = resolveUrl(
-        requestUrl,
-        playerResponse.streamingData.dashManifestUrl
-      );
-      if (dashManifestUrl) {
-        videos.push({
-          fileName: title,
-          url: dashManifestUrl,
-          quality: 'adaptive',
-          playlist: true,
-          thumbnailUrl,
-        });
+      // Use manifests only as a fallback when no direct progressive stream URL is exposed.
+      if (!videos.length) {
+        const hlsManifestUrl = resolveUrl(
+          requestUrl,
+          playerResponse.streamingData.hlsManifestUrl
+        );
+        const dashManifestUrl = resolveUrl(
+          requestUrl,
+          playerResponse.streamingData.dashManifestUrl
+        );
+        const manifestUrl = hlsManifestUrl || dashManifestUrl;
+        if (manifestUrl) {
+          const format = hlsManifestUrl ? 'HLS' : 'DASH';
+          videos.push({
+            fileName: title,
+            url: manifestUrl,
+            quality: 'adaptive',
+            playlist: true,
+            thumbnailUrl,
+            source: 'youtube',
+            hasAudio: true,
+            isPrimary: true,
+            note: `${format} manifest`,
+          });
+        }
       }
 
       if (videos.length) {
@@ -404,7 +462,8 @@
       }
 
       if (videos && videos.length) {
-        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos }));
+        videos.sort((a, b) => qualityToPixels(b.quality) - qualityToPixels(a.quality));
+        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos.slice(0, 4) }));
       }
     },
   };
@@ -525,7 +584,8 @@
           }
         }
         if (videos.length) {
-          window.dispatchEvent(new CustomEvent('videos-found', { detail: videos }));
+          videos.sort((a, b) => qualityToPixels(b.quality) - qualityToPixels(a.quality));
+          window.dispatchEvent(new CustomEvent('videos-found', { detail: videos.slice(0, 5) }));
         }
       }
     },
@@ -752,7 +812,6 @@
     kickParser,
     pornhubParser,
     xvideosParser,
-    genericUrlParser,
     genericStreamParser, // Must be last
   ];
 

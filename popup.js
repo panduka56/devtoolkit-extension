@@ -2272,6 +2272,16 @@ function getVideoSizeLabel(video) {
   return video.playlist ? 'Stream playlist' : 'Size unknown';
 }
 
+function getVideoAvailabilityLabel(video) {
+  if (video.requiresMux) {
+    return 'Video-only stream';
+  }
+  if (video.hasAudio === false) {
+    return 'No audio track';
+  }
+  return '';
+}
+
 function applyMetadataToVideoItem(item, metadata) {
   if (!item || !metadata) {
     return;
@@ -2374,6 +2384,13 @@ function renderVideoList(videos, tabId) {
     formatBadge.textContent = inferVideoFormat(video);
     meta.appendChild(formatBadge);
 
+    if (video.isPrimary) {
+      const primaryBadge = document.createElement('span');
+      primaryBadge.className = 'videoBadge primary';
+      primaryBadge.textContent = 'Main';
+      meta.appendChild(primaryBadge);
+    }
+
     if (video.quality && video.quality !== 'N/A') {
       const qualityBadge = document.createElement('span');
       qualityBadge.className = 'videoBadge quality';
@@ -2391,8 +2408,15 @@ function renderVideoList(videos, tabId) {
 
     const dlBtn = document.createElement('button');
     dlBtn.className = 'videoDownloadBtn';
-    dlBtn.textContent = 'Download';
-    dlBtn.addEventListener('click', () => downloadVideo(video));
+    const unavailableReason = getVideoAvailabilityLabel(video);
+    if (unavailableReason) {
+      dlBtn.textContent = 'Unavailable';
+      dlBtn.disabled = true;
+      dlBtn.title = unavailableReason;
+    } else {
+      dlBtn.textContent = 'Download';
+      dlBtn.addEventListener('click', () => downloadVideo(video));
+    }
     item.appendChild(dlBtn);
 
     videoListEl.appendChild(item);
@@ -2405,6 +2429,11 @@ function renderVideoList(videos, tabId) {
 
 async function downloadVideo(video) {
   try {
+    if (video.requiresMux || video.hasAudio === false) {
+      throw new Error(
+        'Selected stream is not directly downloadable with audio in-browser.'
+      );
+    }
     const response = await chrome.runtime.sendMessage({
       type: 'DOWNLOAD_VIDEO',
       url: video.url,
