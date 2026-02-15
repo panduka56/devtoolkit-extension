@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DevToolkit</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brandIcon" aria-hidden="true">
+            <svg viewBox="0 0 64 64">
+              <defs>
+                <linearGradient
+                  id="brandAccent"
+                  x1="0%"
+                  y1="0%"
+                  x2="100%"
+                  y2="100%"
+                >
+                  <stop offset="0%" stop-color="#11e8a4" />
+                  <stop offset="100%" stop-color="#25f4d1" />
+                </linearGradient>
+              </defs>
+              <rect x="4" y="4" width="56" height="56" rx="16" fill="#0e1517" />
+              <path
+                d="M20 26 L30 36 L20 46"
+                stroke="url(#brandAccent)"
+                stroke-width="4.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                fill="none"
+              />
+              <rect
+                x="35"
+                y="39"
+                width="10"
+                height="3.8"
+                rx="1.9"
+                fill="url(#brandAccent)"
+              />
+            </svg>
+          </div>
+          <div>
+            <h1>DevToolkit</h1>
+            <p class="sub">Video, console, SEO, AI tools.</p>
+          </div>
+        </div>
+        <div class="topbarActions">
+          <span id="activeFormat" class="badge">AI compact</span>
+          <button
+            id="refreshButton"
+            class="iconBtn"
+            type="button"
+            title="Refresh preview"
+          >
+            ↻
+          </button>
+        </div>
+      </header>
+
+      <nav class="navBar" aria-label="Extension sections">
+        <div class="categorySwitch" role="radiogroup" aria-label="Category">
+          <button class="categoryBtn is-active" type="button" data-category="video">Video</button>
+          <button class="categoryBtn" type="button" data-category="console">Console</button>
+          <button class="categoryBtn" type="button" data-category="pageintel">Page Intel</button>
+          <button class="categoryBtn" type="button" data-category="context">Context</button>
+          <button class="categoryBtn" type="button" data-category="settings">Settings</button>
+        </div>
+        <div class="subTabs" id="subTabsBar"></div>
+      </nav>
+
+      <section id="videoView" class="view is-active">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Detected Videos</h2>
+            <button id="downloadAllButton" class="actionBtn" type="button" style="display: none;">Download All</button>
+          </div>
+          <div id="videoList" class="videoList">
+            <p class="hint">No videos detected on this page. Navigate to a page with video content.</p>
+          </div>
+          <p id="videoStatus" class="statusLine">Video status: scanning...</p>
+        </section>
+      </section>
+
+      <section id="logsView" class="view">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Capture Scope</h2>
+          </div>
+          <div class="scopeSwitch" role="radiogroup" aria-label="Log scope">
+            <button
+              class="scopeBtn is-active"
+              type="button"
+              data-level-preset="errors"
+            >
+              Errors
+            </button>
+            <button class="scopeBtn" type="button" data-level-preset="warnings">
+              Medium
+            </button>
+            <button class="scopeBtn" type="button" data-level-preset="full">
+              Full
+            </button>
+          </div>
+
+          <div class="grid">
+            <label>
+              <span>Format</span>
+              <select id="formatSelect">
+                <option value="ai">AI compact</option>
+                <option value="xml">XML compact</option>
+                <option value="plain">Plain text</option>
+              </select>
+            </label>
+            <label class="toggleLabel" for="optimizeToggle">
+              <span>Token Saver</span>
+              <span class="toggleWrap">
+                <input id="optimizeToggle" type="checkbox" checked />
+                <i class="toggleTrack"></i>
+                <strong>Dedupe + stack trim</strong>
+              </span>
+            </label>
+            <label>
+              <span>Max entries</span>
+              <input
+                id="maxEntriesInput"
+                type="number"
+                min="50"
+                max="5000"
+                step="50"
+                value="500"
+              />
+            </label>
+            <label>
+              <span>Max chars/log</span>
+              <input
+                id="maxCharsInput"
+                type="number"
+                min="200"
+                max="3000"
+                step="100"
+                value="700"
+              />
+            </label>
+          </div>
+
+          <div class="stats">
+            <article>
+              <p>Total</p>
+              <strong id="statTotal">0</strong>
+            </article>
+            <article>
+              <p>Selected</p>
+              <strong id="statSelected">0</strong>
+            </article>
+            <article>
+              <p>Unique</p>
+              <strong id="statUnique">0</strong>
+            </article>
+            <article>
+              <p>Est tokens</p>
+              <strong id="statTokens">0</strong>
+            </article>
+          </div>
+
+          <div class="previewWrap">
+            <div class="previewHead">
+              <h3>Payload Preview</h3>
+              <button id="copyButton" class="actionBtn" type="button">
+                Copy Preview
+              </button>
+            </div>
+            <pre id="previewText">Loading preview...</pre>
+          </div>
+        </section>
+      </section>
+
+      <section id="briefView" class="view">
+        <section class="card aiCard">
+          <div class="cardHead">
+            <h2>AI Brief From Console</h2>
+          </div>
+          <p class="hint">
+            Uses captured console payload from Main and your configured
+            AI provider settings.
+          </p>
+          <div class="aiActions">
+            <button
+              id="summarizeButton"
+              class="actionBtn primary"
+              type="button"
+            >
+              Generate AI Brief
+            </button>
+            <button id="copySummaryButton" class="actionBtn" type="button">
+              Copy Brief
+            </button>
+          </div>
+          <pre id="summaryText">
+AI brief will appear here after generation.</pre
+          >
+          <p id="aiStatus" class="statusLine">AI brief status: idle</p>
+        </section>
+      </section>
+
+      <section id="contextView" class="view">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Page Context Pack</h2>
+          </div>
+          <p class="hint">
+            Scans full rendered page content and key UI elements, then filters
+            it into an AI-ready handoff. Console logs are not used in this
+            mode.
+          </p>
+          <div class="contextActions">
+            <button id="extractContextButton" class="actionBtn primary" type="button">
+              Extract Full Page
+            </button>
+            <button id="condenseContextButton" class="actionBtn" type="button">
+              Generate AI Context Brief
+            </button>
+            <button id="copyContextButton" class="actionBtn" type="button">
+              Copy Context Pack
+            </button>
+          </div>
+          <pre id="contextText">
+AI context will appear here after generation.</pre
+          >
+          <pre id="contextAiText">
+AI condensed context will appear here after generation.</pre
+          >
+          <p id="contextStatus" class="statusLine">Context status: idle</p>
+        </section>
+      </section>
+
+      <section id="seoView" class="view">
+        <section class="card">
+          <div class="cardHead">
+            <h2>SEO & Meta Overview</h2>
+          </div>
+          <p class="hint">Scan page for SEO metadata, Open Graph, Twitter Cards, heading hierarchy, and image alt coverage.</p>
+          <div class="seoActions">
+            <button id="scanSeoButton" class="actionBtn primary" type="button">Scan Page</button>
+            <button id="copySeoButton" class="actionBtn" type="button">Copy Report</button>
+          </div>
+          <div id="seoResults" class="seoResults">
+            <p class="hint">Click "Scan Page" to extract SEO metadata.</p>
+          </div>
+          <p id="seoStatus" class="statusLine">SEO status: idle</p>
+        </section>
+      </section>
+
+      <section id="schemaView" class="view">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Structured Data</h2>
+          </div>
+          <div class="schemaActions">
+            <button id="scanSchemaButton" class="actionBtn primary" type="button">Scan Page</button>
+            <button id="testRichResultsButton" class="actionBtn" type="button">Test in Google</button>
+            <button id="copySchemaButton" class="actionBtn" type="button">Copy Data</button>
+          </div>
+          <div class="stats" id="schemaStats" style="display: none;">
+            <article><p>Types</p><strong id="schemaStatTypes">0</strong></article>
+            <article><p>JSON-LD</p><strong id="schemaStatJsonLd">0</strong></article>
+            <article><p>Microdata</p><strong id="schemaStatMicrodata">0</strong></article>
+            <article><p>Warnings</p><strong id="schemaStatWarnings">0</strong></article>
+          </div>
+          <div id="schemaResults" class="schemaResults">
+            <p class="hint">Click "Scan Page" to extract structured data.</p>
+          </div>
+          <p id="schemaStatus" class="statusLine">Schema status: idle</p>
+        </section>
+      </section>
+
+      <section id="sitemapView" class="view">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Sitemap Explorer</h2>
+          </div>
+          <div class="sitemapUrlInput">
+            <label>
+              <span>Sitemap URL</span>
+              <input id="sitemapUrlInput" type="text" placeholder="https://example.com/sitemap.xml" />
+            </label>
+          </div>
+          <div class="sitemapActions">
+            <button id="fetchSitemapButton" class="actionBtn primary" type="button">Fetch Sitemap</button>
+            <button id="copySitemapUrlsButton" class="actionBtn" type="button">Copy URLs</button>
+            <button id="downloadSitemapTextButton" class="actionBtn" type="button">Download Full Text</button>
+            <button id="downloadSitemapJsonButton" class="actionBtn" type="button">Download JSON</button>
+          </div>
+          <div class="sitemapFilters" id="sitemapFilters" style="display: none;">
+            <div class="grid">
+              <label>
+                <span>Search URLs</span>
+                <input id="sitemapSearchInput" type="text" placeholder="Filter by path..." />
+              </label>
+              <label>
+                <span>Path pattern</span>
+                <input id="sitemapPatternInput" type="text" placeholder="/blog/*" />
+              </label>
+            </div>
+          </div>
+          <div class="stats" id="sitemapStats" style="display: none;">
+            <article><p>Total URLs</p><strong id="sitemapStatTotal">0</strong></article>
+            <article><p>Filtered</p><strong id="sitemapStatFiltered">0</strong></article>
+            <article><p>Domains</p><strong id="sitemapStatDomains">0</strong></article>
+            <article><p>Date Range</p><strong id="sitemapStatDates">-</strong></article>
+          </div>
+          <div id="sitemapResults" class="sitemapResults">
+            <p class="hint">Click "Fetch Sitemap" to discover and parse the sitemap.</p>
+          </div>
+          <p id="sitemapStatus" class="statusLine">Sitemap status: idle</p>
+        </section>
+      </section>
+
+      <section id="settingsView" class="view">
+        <section class="card aiCard">
+          <div class="cardHead">
+            <h2>AI Provider Settings</h2>
+            <span id="apiKeyState" class="statePill stateWarn"
+              >Key missing</span
+            >
+          </div>
+          <p class="hint">
+            API key and model settings are saved locally in extension storage.
+          </p>
+          <div class="grid">
+            <label>
+              <span>AI Provider</span>
+              <select id="providerSelect">
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="ollama">Ollama (Local)</option>
+              </select>
+            </label>
+          </div>
+          <div id="apiKeySection" class="apiKeyRow">
+            <input
+              id="apiKeyInput"
+              type="password"
+              autocomplete="off"
+              placeholder="Paste API key"
+            />
+            <button id="saveKeyButton" class="miniBtn" type="button">
+              Save
+            </button>
+            <button id="clearKeyButton" class="miniBtn muted" type="button">
+              Clear
+            </button>
+          </div>
+          <div id="ollamaUrlSection" class="apiKeyRow" style="display: none;">
+            <input
+              id="ollamaUrlInput"
+              type="text"
+              autocomplete="off"
+              placeholder="http://localhost:11434"
+              value="http://localhost:11434"
+            />
+            <button id="saveOllamaUrlButton" class="miniBtn" type="button">
+              Save URL
+            </button>
+          </div>
+          <div class="grid">
+            <label>
+              <span>Model</span>
+              <select id="modelSelect"></select>
+              <input
+                id="modelInput"
+                class="inlineInput"
+                type="text"
+                placeholder="Enter model name"
+                style="display: none;"
+              />
+            </label>
+            <label>
+              <span>AI output style</span>
+              <select id="summaryStyleSelect">
+                <option value="brief">Brief (recommended)</option>
+                <option value="steps">Step-by-step fix plan</option>
+                <option value="rootcause">Root-cause focused</option>
+              </select>
+            </label>
+          </div>
+          <p id="settingsStatus" class="statusLine">Settings status: idle</p>
+        </section>
+      </section>
+
+      <p id="status" class="statusLine">Preparing preview...</p>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
