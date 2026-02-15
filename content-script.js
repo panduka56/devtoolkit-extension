@@ -1267,6 +1267,9 @@ ${rows}
             hasAudio:
               v.hasAudio === true || v.hasAudio === false ? v.hasAudio : null,
             requiresMux: Boolean(v.requiresMux),
+            audioUrl: toAbsoluteHttpUrl(v.audioUrl || ''),
+            audioExt: typeof v.audioExt === 'string' ? v.audioExt : '',
+            mp3Available: Boolean(v.mp3Available),
             isPrimary: Boolean(v.isPrimary),
           });
         }
@@ -1289,6 +1292,9 @@ ${rows}
           hasAudio:
             item.hasAudio === true || item.hasAudio === false ? item.hasAudio : null,
           requiresMux: Boolean(item.requiresMux),
+          audioUrl: toAbsoluteHttpUrl(item.audioUrl || ''),
+          audioExt: typeof item.audioExt === 'string' ? item.audioExt : '',
+          mp3Available: Boolean(item.mp3Available),
           isPrimary: Boolean(item.isPrimary),
         });
       }

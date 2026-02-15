@@ -251,6 +251,8 @@ function normalizeVideoLink(link) {
     link?.sizeBytes ?? link?.contentLength ?? link?.filesize ?? null
   );
   const extFromUrl = extractExtFromUrl(url);
+  const audioUrl = normalizeHttpUrl(link?.audioUrl);
+  const audioExt = audioUrl ? extractExtFromUrl(audioUrl) : '';
   const playlist = Boolean(link?.playlist) || isPlaylistUrl(url);
   const fileName = sanitizeFileName(link?.fileName || link?.title || 'video');
 
@@ -272,6 +274,12 @@ function normalizeVideoLink(link) {
     contentType:
       typeof link?.contentType === 'string' ? link.contentType.trim() : '',
     ext: extFromUrl || (playlist ? (url.includes('.mpd') ? 'mpd' : 'm3u8') : ''),
+    audioUrl,
+    audioExt,
+    mp3Available:
+      Boolean(link?.mp3Available) ||
+      audioExt === 'mp3' ||
+      /audio\/mpeg/i.test(typeof link?.audioContentType === 'string' ? link.audioContentType : ''),
     source: typeof link?.source === 'string' ? link.source.trim() : '',
     hasAudio:
       link?.hasAudio === true ? true : link?.hasAudio === false ? false : null,
@@ -293,6 +301,9 @@ function mergeVideoLink(existing, incoming) {
       incoming.sizeText || existing.sizeText || (nextSizeBytes ? formatBytes(nextSizeBytes) : ''),
     contentType: incoming.contentType || existing.contentType || '',
     ext: incoming.ext || existing.ext || '',
+    audioUrl: incoming.audioUrl || existing.audioUrl || '',
+    audioExt: incoming.audioExt || existing.audioExt || '',
+    mp3Available: Boolean(incoming.mp3Available || existing.mp3Available),
     source: incoming.source || existing.source || '',
     hasAudio:
       incoming.hasAudio === true || incoming.hasAudio === false
@@ -507,6 +518,9 @@ function buildVideoMetadata(video, fallbackUrl = '') {
     ext: video?.ext || extractExtFromUrl(url),
     contentType: video?.contentType || '',
     thumbnailUrl: video?.thumbnailUrl || '',
+    audioUrl: video?.audioUrl || '',
+    audioExt: video?.audioExt || '',
+    mp3Available: Boolean(video?.mp3Available),
     sizeBytes,
     sizeText: sizeBytes
       ? formatBytes(sizeBytes)
@@ -883,6 +897,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           sendResponse({ ok: true, downloadId });
         });
+        return;
+      }
+
+      if (message.type === 'DOWNLOAD_AUDIO') {
+        if (!message.url || typeof message.url !== 'string') {
+          throw new Error('No audio URL provided.');
+        }
+        const normalizedUrl = normalizeHttpUrl(message.url);
+        if (!normalizedUrl) {
+          throw new Error('Invalid audio URL.');
+        }
+        const ext = extractExtFromUrl(normalizedUrl);
+        const requireMp3 = message.requireMp3 !== false;
+        if (requireMp3 && ext !== 'mp3') {
+          sendResponse({
+            ok: false,
+            error: 'MP3 extraction is not possible for this stream.',
+          });
+          return;
+        }
+        chrome.downloads.download(
+          {
+            url: normalizedUrl,
+            filename: message.filename || undefined,
+            conflictAction: 'uniquify',
+          },
+          (downloadId) => {
+            if (chrome.runtime.lastError || !Number.isInteger(downloadId)) {
+              sendResponse({
+                ok: false,
+                error:
+                  chrome.runtime.lastError?.message ||
+                  'Audio download could not be started for this URL.',
+              });
+              return;
+            }
+            sendResponse({ ok: true, downloadId });
+          }
+        );
         return;
       }
 

@@ -147,6 +147,43 @@
     return 0;
   }
 
+  function firstUrl(value) {
+    if (!value) {
+      return '';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const item = firstUrl(value[i]);
+        if (item) return item;
+      }
+      return '';
+    }
+    if (typeof value === 'object') {
+      if (typeof value.url === 'string') {
+        return value.url;
+      }
+      if (Array.isArray(value.url_list)) {
+        return firstUrl(value.url_list);
+      }
+      if (Array.isArray(value.urlList)) {
+        return firstUrl(value.urlList);
+      }
+      if (typeof value.play_url === 'string') {
+        return value.play_url;
+      }
+      if (value.play_url && typeof value.play_url === 'object') {
+        return firstUrl(value.play_url);
+      }
+      if (value.playAddr && typeof value.playAddr === 'object') {
+        return firstUrl(value.playAddr);
+      }
+    }
+    return '';
+  }
+
   // === Site-Specific Parsers (Inlined) ===
 
   // --- Instagram Parser ---
@@ -281,6 +318,161 @@
     },
   };
 
+  // --- TikTok Parser ---
+  const tiktokParser = {
+    origins: [/tiktok\.com/],
+    onLoad(responseText, requestUrl) {
+      if (
+        !responseText.includes('aweme') &&
+        !responseText.includes('play_addr') &&
+        !responseText.includes('download_addr')
+      ) {
+        return;
+      }
+
+      let data = null;
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        const cleaned = responseText.replace(/^[)\]\}'\s]+/, '');
+        try {
+          data = JSON.parse(cleaned);
+        } catch {
+          return;
+        }
+      }
+
+      const awemeItems = [];
+      const visited = new Set();
+      function walk(obj) {
+        if (!obj || typeof obj !== 'object') {
+          return;
+        }
+        if (visited.has(obj)) {
+          return;
+        }
+        visited.add(obj);
+
+        if (
+          obj.video &&
+          (obj.video.play_addr || obj.video.download_addr || Array.isArray(obj.video.bit_rate))
+        ) {
+          awemeItems.push(obj);
+        }
+
+        const values = Object.values(obj);
+        for (let i = 0; i < values.length; i++) {
+          if (values[i] && typeof values[i] === 'object') {
+            walk(values[i]);
+          }
+        }
+      }
+      walk(data);
+      if (!awemeItems.length) {
+        return;
+      }
+
+      function qualityFromNode(node, fallback = 'N/A') {
+        if (!node || typeof node !== 'object') {
+          return fallback;
+        }
+        const height =
+          Number(node.height) ||
+          Number(node.play_addr?.height) ||
+          Number(node.playAddr?.height) ||
+          0;
+        if (height > 0) {
+          return `${height}p`;
+        }
+        const gear = typeof node.gear_name === 'string' ? node.gear_name : '';
+        const match = gear.match(/(\d{3,4})/);
+        return match ? `${match[1]}p` : fallback;
+      }
+
+      const seen = new Set();
+      const videos = [];
+
+      function addTikTokVideo(urlValue, payload) {
+        const resolved = resolveUrl(requestUrl, firstUrl(urlValue));
+        if (!resolved || seen.has(resolved)) {
+          return;
+        }
+        seen.add(resolved);
+        videos.push(payload(resolved));
+      }
+
+      for (let i = 0; i < awemeItems.length && i < 12; i++) {
+        const aweme = awemeItems[i];
+        const video = aweme.video || {};
+        const title = aweme.desc || document.title || '';
+        const thumbnailUrl = resolveUrl(
+          requestUrl,
+          firstUrl(video.cover || video.dynamic_cover || video.origin_cover)
+        );
+        const audioUrl = resolveUrl(
+          requestUrl,
+          firstUrl(
+            aweme.music?.play_url ||
+              aweme.music?.playUrl ||
+              aweme.music?.play_url_hd ||
+              aweme.music?.matched_song?.play_url
+          )
+        );
+        const mp3Available = /\.mp3(\?|$)/i.test(audioUrl);
+
+        addTikTokVideo(video.download_addr, (resolved) => ({
+          fileName: title,
+          url: resolved,
+          quality: qualityFromNode(video.download_addr, qualityFromNode(video)),
+          thumbnailUrl,
+          source: 'tiktok',
+          hasAudio: true,
+          audioUrl,
+          audioExt: mp3Available ? 'mp3' : '',
+          mp3Available,
+          isPrimary: true,
+        }));
+
+        addTikTokVideo(video.play_addr, (resolved) => ({
+          fileName: title,
+          url: resolved,
+          quality: qualityFromNode(video.play_addr, qualityFromNode(video)),
+          thumbnailUrl,
+          source: 'tiktok',
+          hasAudio: true,
+          audioUrl,
+          audioExt: mp3Available ? 'mp3' : '',
+          mp3Available,
+        }));
+
+        if (Array.isArray(video.bit_rate)) {
+          for (let b = 0; b < video.bit_rate.length; b++) {
+            const variant = video.bit_rate[b];
+            addTikTokVideo(variant.play_addr || variant.playAddr || variant.play_addr_265, (resolved) => ({
+              fileName: title,
+              url: resolved,
+              quality: qualityFromNode(variant, qualityFromNode(video)),
+              thumbnailUrl,
+              source: 'tiktok',
+              hasAudio: true,
+              audioUrl,
+              audioExt: mp3Available ? 'mp3' : '',
+              mp3Available,
+            }));
+          }
+        }
+      }
+
+      if (videos.length) {
+        videos.sort((a, b) => qualityToPixels(b.quality) - qualityToPixels(a.quality));
+        if (videos[0]) {
+          videos[0].isPrimary = true;
+        }
+        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos.slice(0, 6) }));
+      }
+    },
+  };
+
   // --- YouTube Parser ---
   const youtubeParser = {
     origins: [/youtube\.com/, /googlevideo\.com/],
@@ -337,6 +529,7 @@
 
       const progressive = [];
       const adaptive = [];
+      const audioOnly = [];
       const seenItags = new Set();
 
       for (let i = 0; i < formats.length; i++) {
@@ -345,15 +538,28 @@
         const url = resolveUrl(requestUrl, format.url || '');
         if (!url) continue;
         const mimeType = typeof format.mimeType === 'string' ? format.mimeType : '';
-        if (!mimeType.includes('video/')) continue;
         const itag = String(format.itag || '');
         if (itag && seenItags.has(itag)) continue;
         if (itag) seenItags.add(itag);
-        const hasAudio = Boolean(format.audioQuality || format.audioSampleRate);
         const contentLength = Number.parseInt(format.contentLength || '', 10);
-        const quality = sanitizeQuality(
+        const normalizedQuality = sanitizeQuality(
           format.qualityLabel || (format.height ? `${format.height}p` : format.quality)
         );
+
+        if (mimeType.includes('audio/')) {
+          audioOnly.push({
+            url,
+            mimeType: mimeType.split(';')[0] || '',
+            bitrate: Number(format.bitrate) || 0,
+            sizeBytes: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null,
+            mp3Available:
+              /audio\/mpeg/i.test(mimeType) || /\.mp3(\?|$)/i.test(url),
+          });
+          continue;
+        }
+        if (!mimeType.includes('video/')) continue;
+        const hasAudio = Boolean(format.audioQuality || format.audioSampleRate);
+        const quality = normalizedQuality;
 
         const candidate = {
           fileName: title,
@@ -378,17 +584,25 @@
 
       progressive.sort((a, b) => (b.score || 0) - (a.score || 0));
       adaptive.sort((a, b) => (b.score || 0) - (a.score || 0));
+      audioOnly.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      const bestAudio = audioOnly[0] || null;
 
       if (progressive.length > 0) {
         for (let i = 0; i < Math.min(progressive.length, 4); i++) {
           videos.push({
             ...progressive[i],
+            audioUrl: bestAudio ? bestAudio.url : '',
+            audioExt: bestAudio ? (bestAudio.url.includes('.mp3') ? 'mp3' : '') : '',
+            mp3Available: Boolean(bestAudio?.mp3Available),
             isPrimary: i === 0,
           });
         }
       } else if (adaptive.length > 0) {
         videos.push({
           ...adaptive[0],
+          audioUrl: bestAudio ? bestAudio.url : '',
+          audioExt: bestAudio ? (bestAudio.url.includes('.mp3') ? 'mp3' : '') : '',
+          mp3Available: Boolean(bestAudio?.mp3Available),
           isPrimary: true,
           requiresMux: true,
         });
@@ -415,6 +629,9 @@
             thumbnailUrl,
             source: 'youtube',
             hasAudio: true,
+            audioUrl: bestAudio ? bestAudio.url : '',
+            audioExt: bestAudio ? (bestAudio.url.includes('.mp3') ? 'mp3' : '') : '',
+            mp3Available: Boolean(bestAudio?.mp3Available),
             isPrimary: true,
             note: `${format} manifest`,
           });
@@ -804,6 +1021,7 @@
   const parsers = [
     instagramParser,
     twitterParser,
+    tiktokParser,
     youtubeParser,
     vimeoParser,
     hlsParser,

@@ -2282,6 +2282,27 @@ function getVideoAvailabilityLabel(video) {
   return '';
 }
 
+function hasAudioCandidate(video) {
+  return typeof video.audioUrl === 'string' && video.audioUrl.length > 0;
+}
+
+function canDownloadMp3(video) {
+  return Boolean(video.mp3Available) && hasAudioCandidate(video);
+}
+
+function buildMp3Filename(video) {
+  const base = sanitizeFileStem(
+    video.fileName || (() => {
+      try {
+        return new URL(video.url).pathname.split('/').pop() || 'audio';
+      } catch {
+        return 'audio';
+      }
+    })()
+  );
+  return base.toLowerCase().endsWith('.mp3') ? base : `${base}.mp3`;
+}
+
 function applyMetadataToVideoItem(item, metadata) {
   if (!item || !metadata) {
     return;
@@ -2304,6 +2325,13 @@ function applyMetadataToVideoItem(item, metadata) {
       formatVideoSize(metadata.sizeBytes) ||
       (metadata.playlist ? 'Stream playlist' : 'Size unknown');
     sizeBadge.textContent = text;
+  }
+
+  const audioBtn = item.querySelector('.videoAudioBtn');
+  if (audioBtn && metadata.mp3Available) {
+    audioBtn.disabled = false;
+    audioBtn.title = '';
+    audioBtn.classList.remove('muted');
   }
 }
 
@@ -2406,6 +2434,9 @@ function renderVideoList(videos, tabId) {
     info.appendChild(meta);
     item.appendChild(info);
 
+    const actions = document.createElement('div');
+    actions.className = 'videoActions';
+
     const dlBtn = document.createElement('button');
     dlBtn.className = 'videoDownloadBtn';
     const unavailableReason = getVideoAvailabilityLabel(video);
@@ -2417,7 +2448,21 @@ function renderVideoList(videos, tabId) {
       dlBtn.textContent = 'Download';
       dlBtn.addEventListener('click', () => downloadVideo(video));
     }
-    item.appendChild(dlBtn);
+    actions.appendChild(dlBtn);
+
+    if (hasAudioCandidate(video)) {
+      const audioBtn = document.createElement('button');
+      audioBtn.className = 'videoAudioBtn';
+      audioBtn.textContent = 'MP3';
+      if (!canDownloadMp3(video)) {
+        audioBtn.classList.add('muted');
+        audioBtn.title = 'MP3 extraction is not possible for this stream.';
+      }
+      audioBtn.addEventListener('click', () => downloadMp3(video));
+      actions.appendChild(audioBtn);
+    }
+
+    item.appendChild(actions);
 
     videoListEl.appendChild(item);
 
@@ -2449,6 +2494,30 @@ async function downloadVideo(video) {
   }
 }
 
+async function downloadMp3(video) {
+  try {
+    if (!hasAudioCandidate(video)) {
+      throw new Error('No extractable audio track found for this video.');
+    }
+    if (!canDownloadMp3(video)) {
+      throw new Error('MP3 extraction is not possible for this stream.');
+    }
+    const response = await chrome.runtime.sendMessage({
+      type: 'DOWNLOAD_AUDIO',
+      url: video.audioUrl,
+      filename: buildMp3Filename(video),
+      requireMp3: true,
+    });
+    if (response?.ok) {
+      setVideoStatus('MP3 download started.', 'success');
+    } else {
+      throw new Error(response?.error || 'MP3 download was rejected.');
+    }
+  } catch (error) {
+    setVideoStatus(`MP3 unavailable: ${error.message}`, 'error');
+  }
+}
+
 async function downloadAllVideos() {
   try {
     const activeTab = await getActiveTabOrThrow();
@@ -2457,7 +2526,14 @@ async function downloadAllVideos() {
       tabId: activeTab.id,
     });
     if (response?.ok && response.videos?.length) {
-      for (const video of response.videos) {
+      const downloadableVideos = response.videos.filter(
+        (video) => !getVideoAvailabilityLabel(video)
+      );
+      if (!downloadableVideos.length) {
+        setVideoStatus('No directly downloadable video streams found.', 'error');
+        return;
+      }
+      for (const video of downloadableVideos) {
         await downloadVideo(video);
       }
     }
