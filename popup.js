@@ -2654,19 +2654,6 @@ function parseVideoUrl(video) {
   }
 }
 
-function isInstagramLikeHost(hostname) {
-  if (typeof hostname !== 'string' || !hostname) {
-    return false;
-  }
-  const host = hostname.toLowerCase();
-  return (
-    host === 'instagram.com' ||
-    host.endsWith('.instagram.com') ||
-    host.includes('cdninstagram.com') ||
-    host.includes('fbcdn.net')
-  );
-}
-
 function isLikelyPartialStream(video) {
   const parsed = parseVideoUrl(video);
   if (!parsed) {
@@ -2692,10 +2679,6 @@ function getVideoAvailabilityLabel(video) {
   }
   if (isLikelyPartialStream(video)) {
     return 'Partial stream segment';
-  }
-  const parsed = parseVideoUrl(video);
-  if (parsed && isInstagramLikeHost(parsed.hostname)) {
-    return 'Instagram stream (use yt-dlp mode)';
   }
   if (video.requiresMux) {
     return 'Video-only stream';
