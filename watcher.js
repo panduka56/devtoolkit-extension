@@ -292,6 +292,73 @@
     return '';
   }
 
+  function normalizeTitleCandidate(value) {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    const cleaned = value
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s"'\-:|]+|[\s"'\-:|]+$/g, '')
+      .replace(/\s*[|•·-]\s*(tiktok|instagram|youtube|facebook|x|twitter).*$/i, '')
+      .trim();
+    if (!cleaned) {
+      return '';
+    }
+    if (/^(tiktok|instagram|youtube|video|watch)$/i.test(cleaned)) {
+      return '';
+    }
+    return cleaned.slice(0, 120);
+  }
+
+  function deriveTitleFromPageUrl() {
+    try {
+      const path = document.location.pathname || '';
+      const tikTokMatch = path.match(/\/video\/(\d{8,})/);
+      if (tikTokMatch) {
+        return `tiktok_${tikTokMatch[1]}`;
+      }
+      const instaMatch = path.match(/\/(?:reel|p|tv)\/([A-Za-z0-9_-]{5,})/);
+      if (instaMatch) {
+        return `instagram_${instaMatch[1]}`;
+      }
+      const slug = path.split('/').filter(Boolean).pop() || '';
+      if (slug && slug.length >= 5) {
+        return slug.replace(/[_-]+/g, ' ');
+      }
+    } catch {
+      // Ignore URL parsing failures.
+    }
+    return 'video';
+  }
+
+  function getPreferredPageVideoTitle() {
+    const titleCandidates = [
+      document.querySelector('[data-e2e="browse-video-desc"]')?.textContent || '',
+      document.querySelector('[data-e2e="video-desc"]')?.textContent || '',
+      document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '',
+      document.querySelector('meta[name="twitter:title"]')?.getAttribute('content') || '',
+      document.querySelector('h1')?.textContent || '',
+      document.title || '',
+    ];
+    for (let i = 0; i < titleCandidates.length; i++) {
+      const normalized = normalizeTitleCandidate(titleCandidates[i]);
+      if (normalized) {
+        return normalized;
+      }
+    }
+    return deriveTitleFromPageUrl();
+  }
+
+  function getCurrentTikTokAwemeId() {
+    try {
+      const path = document.location.pathname || '';
+      const match = path.match(/\/video\/(\d{8,})/);
+      return match ? match[1] : '';
+    } catch {
+      return '';
+    }
+  }
+
   // === Site-Specific Parsers (Inlined) ===
 
   // --- Instagram Parser ---
@@ -329,7 +396,7 @@
 
       const videos = [];
       const seen = new Set();
-      const pageTitle = document.title.replace(/\s*[•|·@].*$/, '').trim() || 'instagram_video';
+      const pageTitle = getPreferredPageVideoTitle() || 'instagram_video';
       const pageThumbnail = (
         document.querySelector('meta[property="og:image"]')?.getAttribute('content') || ''
       ).trim();
@@ -352,6 +419,8 @@
               quality: height > 0 ? `${height}p` : 'N/A',
               thumbnailUrl: pageThumbnail,
               source: 'instagram',
+              pageUrl: document.location.href,
+              matchesCurrentPage: true,
               hasAudio: true,
             });
           }
@@ -372,6 +441,8 @@
             quality: 'N/A',
             thumbnailUrl: pageThumbnail,
             source: 'instagram',
+            pageUrl: document.location.href,
+            matchesCurrentPage: true,
             hasAudio: true,
           });
         }
@@ -534,6 +605,8 @@
 
       const awemeItems = [];
       const visited = new Set();
+      const currentAwemeId = getCurrentTikTokAwemeId();
+      const pageVideoTitle = getPreferredPageVideoTitle() || 'tiktok_video';
       function walk(obj) {
         if (!obj || typeof obj !== 'object') {
           return;
@@ -561,6 +634,19 @@
       if (!awemeItems.length) {
         return;
       }
+
+      const matchedAwemes = currentAwemeId
+        ? awemeItems.filter((item) => {
+            const awemeId = String(
+              item?.aweme_id || item?.awemeId || item?.id || item?.group_id || ''
+            ).trim();
+            return awemeId && awemeId === currentAwemeId;
+          })
+        : [];
+      const prioritizedAwemes = (matchedAwemes.length ? matchedAwemes : awemeItems).slice(
+        0,
+        matchedAwemes.length ? 4 : 6
+      );
 
       function qualityFromNode(node, fallback = 'N/A') {
         if (!node || typeof node !== 'object') {
@@ -591,10 +677,15 @@
         videos.push(payload(resolved));
       }
 
-      for (let i = 0; i < awemeItems.length && i < 12; i++) {
-        const aweme = awemeItems[i];
+      for (let i = 0; i < prioritizedAwemes.length; i++) {
+        const aweme = prioritizedAwemes[i];
         const video = aweme.video || {};
-        const title = aweme.desc || document.title || '';
+        const awemeId = String(
+          aweme?.aweme_id || aweme?.awemeId || aweme?.id || aweme?.group_id || ''
+        ).trim();
+        const matchesCurrentPage =
+          Boolean(currentAwemeId) && Boolean(awemeId) && awemeId === currentAwemeId;
+        const title = aweme.desc || pageVideoTitle || document.title || '';
         const thumbnailUrl = resolveUrl(
           requestUrl,
           firstUrl(video.cover || video.dynamic_cover || video.origin_cover)
@@ -624,11 +715,14 @@
           quality: qualityFromNode(video.download_addr, qualityFromNode(video)),
           thumbnailUrl,
           source: 'tiktok',
+          pageUrl: document.location.href,
+          awemeId,
+          matchesCurrentPage,
           hasAudio: true,
           audioUrl,
           audioExt: normalizedAudioExt,
           mp3Available: audioDownloadable,
-          isPrimary: true,
+          isPrimary: matchesCurrentPage || (!currentAwemeId && i === 0),
         }));
 
         addTikTokVideo(video.play_addr, (resolved) => ({
@@ -637,6 +731,9 @@
           quality: qualityFromNode(video.play_addr, qualityFromNode(video)),
           thumbnailUrl,
           source: 'tiktok',
+          pageUrl: document.location.href,
+          awemeId,
+          matchesCurrentPage,
           hasAudio: true,
           audioUrl,
           audioExt: normalizedAudioExt,
@@ -652,6 +749,9 @@
               quality: qualityFromNode(variant, qualityFromNode(video)),
               thumbnailUrl,
               source: 'tiktok',
+              pageUrl: document.location.href,
+              awemeId,
+              matchesCurrentPage,
               hasAudio: true,
               audioUrl,
               audioExt: normalizedAudioExt,
@@ -663,10 +763,11 @@
 
       if (videos.length) {
         videos.sort((a, b) => qualityToPixels(b.quality) - qualityToPixels(a.quality));
-        if (videos[0]) {
+        const explicitPrimaryIndex = videos.findIndex((video) => video.isPrimary);
+        if (explicitPrimaryIndex < 0 && videos[0]) {
           videos[0].isPrimary = true;
         }
-        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos.slice(0, 6) }));
+        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos.slice(0, 5) }));
       }
     },
   };

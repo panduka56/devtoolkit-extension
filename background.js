@@ -139,6 +139,56 @@ function isYoutubeLikeHost(hostname) {
   );
 }
 
+function isTikTokLikeHost(hostname) {
+  return (
+    hostname.includes('tiktok.com') ||
+    hostname.includes('tiktokcdn.com') ||
+    hostname.includes('byteoversea.com') ||
+    hostname.includes('muscdn.com')
+  );
+}
+
+function parseHostname(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    return '';
+  }
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function isGenericVideoName(name) {
+  if (typeof name !== 'string') {
+    return true;
+  }
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return [
+    'video',
+    'instagram_video',
+    'tiktok_video',
+    'youtube video',
+    'watch',
+    'clip',
+  ].includes(normalized);
+}
+
+function deriveVideoNameFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const pathPart = parsed.pathname.split('/').filter(Boolean).pop() || '';
+    const decoded = decodeURIComponent(pathPart || '').replace(/\.[a-z0-9]{2,5}$/i, '');
+    const cleaned = sanitizeFileName(decoded.replace(/[_-]+/g, ' ').trim());
+    return cleaned || '';
+  } catch {
+    return '';
+  }
+}
+
 function canonicalVideoIdentity(video) {
   if (!video?.url) {
     return '';
@@ -199,6 +249,15 @@ function looksLikeJunkVideo(video) {
 function scoreVideoCandidate(video) {
   let score = 0;
   if (video.isPrimary) score += 12000;
+  if (video.matchesCurrentPage) score += 16000;
+  if (video.isPlaying) score += 12000;
+  if (video.inViewport) score += 4200;
+  if (video.visibleRatio) {
+    score += Math.min(Math.floor(video.visibleRatio * 5000), 5000);
+  }
+  if (video.domScore) {
+    score += Math.min(Math.floor(video.domScore), 8000);
+  }
   if (video.hasAudio === true) score += 1500;
   if (video.hasAudio === false) score -= 1000;
   if (!video.playlist) score += 500;
@@ -212,6 +271,12 @@ function scoreVideoCandidate(video) {
   }
   if (video.requiresMux) {
     score -= 900;
+  }
+  if (video.source === 'dom') {
+    score += 650;
+  }
+  if (video.source === 'webRequest') {
+    score -= 220;
   }
   if (looksLikeJunkVideo(video)) {
     score -= 20000;
@@ -241,6 +306,34 @@ function curateVideosForDisplay(videos) {
     return [];
   }
 
+  const focused = candidates.filter(
+    (video) => video.matchesCurrentPage === true || video.isPlaying === true
+  );
+  const hasFocusedSignals = focused.length > 0;
+  if (hasFocusedSignals) {
+    const remaining = candidates
+      .filter((candidate) => !focused.includes(candidate))
+      .sort((a, b) => scoreVideoCandidate(b) - scoreVideoCandidate(a));
+    candidates = focused.concat(remaining.slice(0, 2));
+  }
+
+  const tiktokFocused = candidates.filter(
+    (video) => {
+      const videoHost = parseHostname(video.url);
+      const pageHost = parseHostname(video.pageUrl);
+      return (
+        (isTikTokLikeHost(videoHost) || isTikTokLikeHost(pageHost)) &&
+        (video.matchesCurrentPage === true || video.isPlaying === true || video.isPrimary === true)
+      );
+    }
+  );
+  if (tiktokFocused.length > 0) {
+    const rest = candidates
+      .filter((candidate) => !tiktokFocused.includes(candidate))
+      .sort((a, b) => scoreVideoCandidate(b) - scoreVideoCandidate(a));
+    candidates = tiktokFocused.concat(rest.slice(0, 1));
+  }
+
   const allYoutube = candidates.every((video) => {
     try {
       return isYoutubeLikeHost(new URL(video.url).hostname.toLowerCase());
@@ -267,7 +360,7 @@ function curateVideosForDisplay(videos) {
   }
 
   candidates.sort((a, b) => scoreVideoCandidate(b) - scoreVideoCandidate(a));
-  const limit = allYoutube ? 5 : 12;
+  const limit = allYoutube ? 5 : hasFocusedSignals ? 8 : 10;
   return candidates.slice(0, limit).map((video, idx) => ({
     ...video,
     isPrimary: idx === 0,
@@ -288,7 +381,14 @@ function normalizeVideoLink(link) {
   const audioContentType =
     typeof link?.audioContentType === 'string' ? link.audioContentType : '';
   const playlist = Boolean(link?.playlist) || isPlaylistUrl(url);
-  const fileName = sanitizeFileName(link?.fileName || link?.title || 'video');
+  const requestedFileName = sanitizeFileName(link?.fileName || link?.title || '');
+  const fallbackNameFromUrl = deriveVideoNameFromUrl(url);
+  const fileName =
+    requestedFileName && !isGenericVideoName(requestedFileName)
+      ? requestedFileName
+      : fallbackNameFromUrl || requestedFileName || 'video';
+  const domScoreRaw = Number(link?.domScore);
+  const visibleRatioRaw = Number(link?.visibleRatio);
 
   return {
     id:
@@ -320,6 +420,14 @@ function normalizeVideoLink(link) {
       link?.hasAudio === true ? true : link?.hasAudio === false ? false : null,
     requiresMux: Boolean(link?.requiresMux),
     isPrimary: Boolean(link?.isPrimary),
+    awemeId: typeof link?.awemeId === 'string' ? link.awemeId.trim() : '',
+    matchesCurrentPage: Boolean(link?.matchesCurrentPage),
+    domScore: Number.isFinite(domScoreRaw) ? Math.max(0, domScoreRaw) : 0,
+    isPlaying: Boolean(link?.isPlaying),
+    inViewport: Boolean(link?.inViewport),
+    visibleRatio: Number.isFinite(visibleRatioRaw)
+      ? Math.min(1, Math.max(0, visibleRatioRaw))
+      : 0,
     lastSeenAt: Date.now(),
   };
 }
@@ -347,6 +455,15 @@ function mergeVideoLink(existing, incoming) {
         : existing.hasAudio,
     requiresMux: Boolean(incoming.requiresMux || existing.requiresMux),
     isPrimary: Boolean(incoming.isPrimary || existing.isPrimary),
+    awemeId: incoming.awemeId || existing.awemeId || '',
+    matchesCurrentPage: Boolean(incoming.matchesCurrentPage || existing.matchesCurrentPage),
+    domScore: Math.max(Number(incoming.domScore) || 0, Number(existing.domScore) || 0),
+    isPlaying: Boolean(incoming.isPlaying || existing.isPlaying),
+    inViewport: Boolean(incoming.inViewport || existing.inViewport),
+    visibleRatio: Math.max(
+      Number(incoming.visibleRatio) || 0,
+      Number(existing.visibleRatio) || 0
+    ),
     lastSeenAt: Date.now(),
   };
 }
@@ -1222,7 +1339,7 @@ function extractVideoInfoFromRequest(details) {
   return {
     url,
     quality: 'N/A',
-    fileName: 'video',
+    fileName: deriveVideoNameFromUrl(url) || 'video',
     playlist: isPlaylist,
     contentType: contentType.split(';')[0].trim(),
     sizeBytes: contentLength > 0 ? contentLength : null,

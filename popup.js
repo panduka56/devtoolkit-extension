@@ -2578,6 +2578,54 @@ function sanitizeFileStem(name) {
   return cleaned || 'video';
 }
 
+function isGenericVideoName(name) {
+  if (typeof name !== 'string') {
+    return true;
+  }
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return [
+    'video',
+    'instagram_video',
+    'tiktok_video',
+    'youtube video',
+    'watch',
+    'clip',
+  ].includes(normalized);
+}
+
+function deriveVideoStemFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const pathPart = parsed.pathname.split('/').filter(Boolean).pop() || '';
+    const decoded = decodeURIComponent(pathPart || '').replace(/\.[a-z0-9]{2,5}$/i, '');
+    const cleaned = sanitizeFileStem(decoded.replace(/[_-]+/g, ' ').trim());
+    return cleaned || 'video';
+  } catch {
+    return 'video';
+  }
+}
+
+function getPreferredVideoStem(video) {
+  const name =
+    typeof video?.fileName === 'string' ? video.fileName.trim() : '';
+  if (name && !isGenericVideoName(name)) {
+    return sanitizeFileStem(name);
+  }
+  if (typeof video?.url === 'string' && video.url.trim()) {
+    const fromUrl = deriveVideoStemFromUrl(video.url);
+    if (fromUrl && !isGenericVideoName(fromUrl)) {
+      return fromUrl;
+    }
+  }
+  if (typeof video?.awemeId === 'string' && video.awemeId.trim()) {
+    return sanitizeFileStem(`tiktok_${video.awemeId.trim()}`);
+  }
+  return sanitizeFileStem(name || 'video');
+}
+
 function extractExtFromUrl(url) {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
@@ -2617,15 +2665,7 @@ function inferDownloadExtension(video) {
 
 function buildDownloadFilename(video) {
   const ext = inferDownloadExtension(video);
-  const base = sanitizeFileStem(
-    video.fileName || (() => {
-      try {
-        return new URL(video.url).pathname.split('/').pop() || 'video';
-      } catch {
-        return 'video';
-      }
-    })()
-  );
+  const base = getPreferredVideoStem(video);
   if (base.toLowerCase().endsWith(`.${ext}`)) {
     return base;
   }
@@ -2772,15 +2812,8 @@ function resolveVideoThumbnailUrl(video, pageFallbackThumbnail) {
 
 function buildMp3Filename(video) {
   const ext = video.audioExt || 'mp3';
-  const base = sanitizeFileStem(
-    video.fileName || (() => {
-      try {
-        return new URL(video.url).pathname.split('/').pop() || 'audio';
-      } catch {
-        return 'audio';
-      }
-    })()
-  );
+  const stem = getPreferredVideoStem(video);
+  const base = stem && !isGenericVideoName(stem) ? stem : 'audio';
   if (base.toLowerCase().endsWith(`.${ext}`)) return base;
   return `${base}.${ext}`;
 }
@@ -2906,7 +2939,7 @@ function renderVideoList(videos, tabId, pageFallbackThumbnail = '') {
 
     const name = document.createElement('div');
     name.className = 'videoFileName';
-    name.textContent = video.fileName || video.url.split('/').pop() || 'video';
+    name.textContent = getPreferredVideoStem(video);
     name.title = video.url;
     info.appendChild(name);
 

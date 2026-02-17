@@ -1163,6 +1163,99 @@ ${rows}
     return toAbsoluteHttpUrl(videoPoster);
   }
 
+  function normalizeVideoTitleCandidate(value) {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    const cleaned = value
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s"'\-:|]+|[\s"'\-:|]+$/g, '')
+      .replace(/\s*[|•·-]\s*(tiktok|instagram|youtube|facebook|x|twitter).*$/i, '')
+      .trim();
+    if (!cleaned) {
+      return '';
+    }
+    if (/^(tiktok|instagram|youtube|video|watch)$/i.test(cleaned)) {
+      return '';
+    }
+    return cleaned.slice(0, 120);
+  }
+
+  function deriveVideoTitleFromPageUrl() {
+    try {
+      const path = window.location.pathname || '';
+      const tikTokMatch = path.match(/\/video\/(\d{8,})/);
+      if (tikTokMatch) {
+        return `tiktok_${tikTokMatch[1]}`;
+      }
+      const instaMatch = path.match(/\/(?:reel|p|tv)\/([A-Za-z0-9_-]{5,})/);
+      if (instaMatch) {
+        return `instagram_${instaMatch[1]}`;
+      }
+      const slug = path.split('/').filter(Boolean).pop() || '';
+      if (slug && slug.length >= 5) {
+        return slug.replace(/[_-]+/g, ' ');
+      }
+    } catch {
+      // Ignore URL parsing errors.
+    }
+    return 'video';
+  }
+
+  function getPreferredVideoTitle() {
+    const titleCandidates = [
+      document.querySelector('[data-e2e="browse-video-desc"]')?.textContent || '',
+      document.querySelector('[data-e2e="video-desc"]')?.textContent || '',
+      document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '',
+      document.querySelector('meta[name="twitter:title"]')?.getAttribute('content') || '',
+      document.querySelector('article h1')?.textContent || '',
+      document.querySelector('h1')?.textContent || '',
+      document.title || '',
+    ];
+    for (let i = 0; i < titleCandidates.length; i++) {
+      const normalized = normalizeVideoTitleCandidate(titleCandidates[i]);
+      if (normalized) {
+        return normalized;
+      }
+    }
+    return deriveVideoTitleFromPageUrl();
+  }
+
+  function getVideoElementFocusMetrics(videoEl, idx) {
+    const rect = videoEl.getBoundingClientRect();
+    const width = Math.max(0, rect.width || 0);
+    const height = Math.max(0, rect.height || 0);
+    const area = width * height;
+    const visibleWidth = Math.max(
+      0,
+      Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0)
+    );
+    const visibleHeight = Math.max(
+      0,
+      Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0)
+    );
+    const visibleArea = visibleWidth * visibleHeight;
+    const visibleRatio = area > 0 ? Math.min(1, visibleArea / area) : 0;
+    const isPlaying =
+      !videoEl.paused &&
+      !videoEl.ended &&
+      videoEl.readyState >= 2 &&
+      Number(videoEl.currentTime) > 0;
+    const isVisible = visibleRatio >= 0.2 && width >= 140 && height >= 140;
+    let score = 0;
+    if (isPlaying) score += 6000;
+    if (isVisible) score += 2200;
+    score += Math.min(Math.floor(area / 120), 3000);
+    score += Math.round(visibleRatio * 2200);
+    if (idx === 0) score += 120;
+    return {
+      score,
+      isPlaying,
+      isVisible,
+      visibleRatio: Math.round(visibleRatio * 1000) / 1000,
+    };
+  }
+
   function parseSrcsetUrls(srcsetValue) {
     if (typeof srcsetValue !== 'string' || !srcsetValue.trim()) {
       return [];
@@ -1388,7 +1481,7 @@ ${rows}
     const candidates = [];
     const seen = new Set();
     const fallbackThumb = getPageThumbnailUrl();
-    const pageTitle = document.title || 'video';
+    const pageTitle = getPreferredVideoTitle();
     const mediaPattern = /\.(m3u8|mpd|mp4|webm|m4v|mov|ts)(\?|$)/i;
 
     function addCandidate(url, options = {}) {
@@ -1421,33 +1514,65 @@ ${rows}
             ? options.hasAudio
             : null,
         isPrimary: Boolean(options.isPrimary),
+        matchesCurrentPage: Boolean(options.matchesCurrentPage),
+        domScore: Number(options.domScore) || 0,
+        isPlaying: Boolean(options.isPlaying),
+        inViewport: Boolean(options.inViewport),
+        visibleRatio:
+          Number.isFinite(Number(options.visibleRatio)) &&
+          Number(options.visibleRatio) > 0
+            ? Math.min(1, Math.max(0, Number(options.visibleRatio)))
+            : 0,
       });
     }
 
     const videoElements = Array.from(document.querySelectorAll('video')).slice(0, 25);
-    for (let idx = 0; idx < videoElements.length; idx++) {
-      const videoEl = videoElements[idx];
+    const videoEntries = videoElements.map((videoEl, idx) => ({
+      videoEl,
+      idx,
+      metrics: getVideoElementFocusMetrics(videoEl, idx),
+    }));
+    videoEntries.sort((a, b) => b.metrics.score - a.metrics.score);
+    const primaryVideoElement = videoEntries[0]?.videoEl || null;
+
+    for (let idx = 0; idx < videoEntries.length; idx++) {
+      const entry = videoEntries[idx];
+      const videoEl = entry.videoEl;
       const quality = Number(videoEl.videoHeight) > 0 ? `${videoEl.videoHeight}p` : 'N/A';
       const poster = toAbsoluteHttpUrl(videoEl.poster || '');
       const hasAudioTrack =
         Number(videoEl.mozHasAudio) > 0 ||
         Boolean(videoEl.webkitAudioDecodedByteCount > 0) ||
         Boolean(videoEl.audioTracks && videoEl.audioTracks.length > 0);
+      const isPrimary =
+        videoEl === primaryVideoElement || (entry.metrics.isPlaying && entry.metrics.isVisible);
       if (videoEl.currentSrc) {
         addCandidate(videoEl.currentSrc, {
           quality,
+          fileName: pageTitle,
           thumbnailUrl: poster,
           hasAudio: hasAudioTrack,
-          isPrimary: idx === 0,
+          isPrimary,
+          matchesCurrentPage: true,
+          domScore: entry.metrics.score,
+          isPlaying: entry.metrics.isPlaying,
+          inViewport: entry.metrics.isVisible,
+          visibleRatio: entry.metrics.visibleRatio,
           fromVideoEl: true,
         });
       }
       if (videoEl.src) {
         addCandidate(videoEl.src, {
           quality,
+          fileName: pageTitle,
           thumbnailUrl: poster,
           hasAudio: hasAudioTrack,
-          isPrimary: idx === 0,
+          isPrimary,
+          matchesCurrentPage: true,
+          domScore: entry.metrics.score,
+          isPlaying: entry.metrics.isPlaying,
+          inViewport: entry.metrics.isVisible,
+          visibleRatio: entry.metrics.visibleRatio,
           fromVideoEl: true,
         });
       }
@@ -1455,9 +1580,15 @@ ${rows}
       for (const sourceEl of sourceNodes) {
         addCandidate(sourceEl.src || sourceEl.getAttribute('src') || '', {
           quality,
+          fileName: pageTitle,
           thumbnailUrl: poster,
           hasAudio: hasAudioTrack,
-          isPrimary: idx === 0,
+          isPrimary,
+          matchesCurrentPage: true,
+          domScore: entry.metrics.score,
+          isPlaying: entry.metrics.isPlaying,
+          inViewport: entry.metrics.isVisible,
+          visibleRatio: entry.metrics.visibleRatio,
           fromVideoEl: true,
         });
       }
@@ -1478,6 +1609,7 @@ ${rows}
     if (!event.detail || !event.detail.length) return;
     const videoLinks = [];
     const fallbackThumbnail = getPageThumbnailUrl();
+    const fallbackTitle = getPreferredVideoTitle();
     for (let i = 0; i < event.detail.length; i++) {
       const item = event.detail[i];
       if (Array.isArray(item)) {
@@ -1488,7 +1620,7 @@ ${rows}
           videoLinks.push({
             url: normalizedUrl,
             quality: v.quality || 'N/A',
-            fileName: v.title || v.fileName || document.title,
+            fileName: v.title || v.fileName || fallbackTitle,
             id: v.id || generateId(),
             playlist: v.playlist || false,
             thumbnailUrl:
@@ -1506,6 +1638,15 @@ ${rows}
             audioExt: typeof v.audioExt === 'string' ? v.audioExt : '',
             mp3Available: Boolean(v.mp3Available),
             isPrimary: Boolean(v.isPrimary),
+            awemeId: typeof v.awemeId === 'string' ? v.awemeId : '',
+            matchesCurrentPage: Boolean(v.matchesCurrentPage),
+            domScore: Number(v.domScore) || 0,
+            isPlaying: Boolean(v.isPlaying),
+            inViewport: Boolean(v.inViewport),
+            visibleRatio:
+              Number.isFinite(Number(v.visibleRatio)) && Number(v.visibleRatio) > 0
+                ? Math.min(1, Math.max(0, Number(v.visibleRatio)))
+                : 0,
           });
         }
       } else {
@@ -1514,7 +1655,7 @@ ${rows}
         videoLinks.push({
           url: normalizedUrl,
           quality: item.quality || 'N/A',
-          fileName: item.title || item.fileName || document.title,
+          fileName: item.title || item.fileName || fallbackTitle,
           id: item.id || generateId(),
           playlist: item.playlist || false,
           thumbnailUrl:
@@ -1532,6 +1673,15 @@ ${rows}
           audioExt: typeof item.audioExt === 'string' ? item.audioExt : '',
           mp3Available: Boolean(item.mp3Available),
           isPrimary: Boolean(item.isPrimary),
+          awemeId: typeof item.awemeId === 'string' ? item.awemeId : '',
+          matchesCurrentPage: Boolean(item.matchesCurrentPage),
+          domScore: Number(item.domScore) || 0,
+          isPlaying: Boolean(item.isPlaying),
+          inViewport: Boolean(item.inViewport),
+          visibleRatio:
+            Number.isFinite(Number(item.visibleRatio)) && Number(item.visibleRatio) > 0
+              ? Math.min(1, Math.max(0, Number(item.visibleRatio)))
+              : 0,
         });
       }
     }
