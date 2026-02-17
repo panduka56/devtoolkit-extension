@@ -25,6 +25,7 @@ let tabVideoDataCache = null;
 let tabVideoMutationQueue = Promise.resolve();
 let tabImageDataCache = null;
 let tabImageMutationQueue = Promise.resolve();
+const helperTypeCache = new Map();
 const DEFAULT_LOCAL_HELPER_URL = 'http://127.0.0.1:41771';
 const LOCAL_HELPER_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -566,7 +567,24 @@ function normalizeLocalHelperUrl(value) {
   }
 }
 
-async function callLocalHelper(baseUrl, pathName, payload, timeoutMs = LOCAL_HELPER_TIMEOUT_MS) {
+function helperErrorMessage(prefix, responseData, status, statusText) {
+  const reason =
+    responseData?.error ||
+    responseData?.message ||
+    `${status} ${statusText || 'Request failed'}`;
+  return `${prefix}: ${reason}`;
+}
+
+async function callHelperEndpoint(
+  baseUrl,
+  pathName,
+  {
+    method = 'POST',
+    jsonPayload = undefined,
+    formPayload = undefined,
+    timeoutMs = LOCAL_HELPER_TIMEOUT_MS,
+  } = {}
+) {
   const normalizedBase = normalizeLocalHelperUrl(baseUrl);
   const endpoint = new URL(pathName, `${normalizedBase}/`).href;
   const abortController = new AbortController();
@@ -574,10 +592,25 @@ async function callLocalHelper(baseUrl, pathName, payload, timeoutMs = LOCAL_HEL
     abortController.abort();
   }, timeoutMs);
   try {
+    const headers = {};
+    let body;
+    if (formPayload && typeof formPayload === 'object') {
+      const params = new URLSearchParams();
+      Object.entries(formPayload).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+          params.set(key, String(value));
+        }
+      });
+      body = params.toString();
+      headers['Content-Type'] = 'application/x-www-form-urlencoded;charset=UTF-8';
+    } else if (jsonPayload !== undefined) {
+      body = JSON.stringify(jsonPayload);
+      headers['Content-Type'] = 'application/json';
+    }
     const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload || {}),
+      method,
+      headers,
+      body,
       signal: abortController.signal,
     });
     const text = await response.text();
@@ -589,17 +622,14 @@ async function callLocalHelper(baseUrl, pathName, payload, timeoutMs = LOCAL_HEL
         parsed = { message: text.slice(0, 500) };
       }
     }
-    if (!response.ok) {
-      const reason =
-        parsed?.error ||
-        parsed?.message ||
-        `${response.status} ${response.statusText}`;
-      throw new Error(`Local helper failed: ${reason}`);
-    }
     return {
       baseUrl: normalizedBase,
       endpoint,
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
       data: parsed || { ok: true },
+      rawText: text,
     };
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -612,6 +642,124 @@ async function callLocalHelper(baseUrl, pathName, payload, timeoutMs = LOCAL_HEL
   } finally {
     clearTimeout(timerId);
   }
+}
+
+async function callDevToolkitHelper(baseUrl, pathName, payload) {
+  const response = await callHelperEndpoint(baseUrl, pathName, {
+    method: 'POST',
+    jsonPayload: payload || {},
+  });
+  if (!response.ok) {
+    throw new Error(
+      helperErrorMessage(
+        'Downloader helper failed',
+        response.data,
+        response.status,
+        response.statusText
+      )
+    );
+  }
+  return response;
+}
+
+function getCachedHelperType(baseUrl) {
+  const normalized = normalizeLocalHelperUrl(baseUrl);
+  return helperTypeCache.get(normalized) || '';
+}
+
+function setCachedHelperType(baseUrl, helperType) {
+  const normalized = normalizeLocalHelperUrl(baseUrl);
+  if (!helperType) {
+    helperTypeCache.delete(normalized);
+    return;
+  }
+  helperTypeCache.set(normalized, helperType);
+}
+
+async function detectHelperType(baseUrl, force = false) {
+  const normalizedBase = normalizeLocalHelperUrl(baseUrl);
+  if (!force) {
+    const cached = getCachedHelperType(normalizedBase);
+    if (cached) {
+      return { type: cached, baseUrl: normalizedBase, details: null };
+    }
+  }
+
+  try {
+    const healthResponse = await callHelperEndpoint(normalizedBase, '/health', {
+      method: 'GET',
+      timeoutMs: 8000,
+    });
+    if (healthResponse.ok && healthResponse.data && typeof healthResponse.data === 'object') {
+      const serviceName =
+        typeof healthResponse.data.service === 'string'
+          ? healthResponse.data.service
+          : '';
+      if (serviceName.includes('devtoolkit-local-downloader')) {
+        setCachedHelperType(normalizedBase, 'devtoolkit');
+        return {
+          type: 'devtoolkit',
+          baseUrl: normalizedBase,
+          details: healthResponse.data,
+        };
+      }
+    }
+  } catch {
+    // Fallback probe below.
+  }
+
+  try {
+    const ytServerResponse = await callHelperEndpoint(normalizedBase, '/youtube-dl', {
+      method: 'GET',
+      timeoutMs: 8000,
+    });
+    const markerText = `${ytServerResponse.rawText || ''}`.toLowerCase();
+    if (
+      ytServerResponse.ok &&
+      markerText.includes('youtube-dl') &&
+      markerText.includes('/youtube-dl/q')
+    ) {
+      setCachedHelperType(normalizedBase, 'youtube-dl-server');
+      return {
+        type: 'youtube-dl-server',
+        baseUrl: normalizedBase,
+        details: { service: 'youtube-dl-server' },
+      };
+    }
+  } catch {
+    // Probe failed; handled below.
+  }
+
+  throw new Error(
+    `No supported downloader API found at ${normalizedBase}. Expected /health (DevToolkit helper) or /youtube-dl (youtube-dl-server).`
+  );
+}
+
+async function callYoutubeDlServerQueue(baseUrl, { url, format }) {
+  const normalizedUrl = normalizeHttpUrl(url);
+  if (!normalizedUrl) {
+    throw new Error('No valid URL was provided for youtube-dl-server.');
+  }
+  const safeFormat =
+    typeof format === 'string' && format.trim() ? format.trim() : 'mp4';
+  const response = await callHelperEndpoint(baseUrl, '/youtube-dl/q', {
+    method: 'POST',
+    formPayload: {
+      url: normalizedUrl,
+      format: safeFormat,
+    },
+  });
+  if (!response.ok || response.data?.success === false) {
+    throw new Error(
+      helperErrorMessage(
+        'youtube-dl-server request failed',
+        response.data,
+        response.status,
+        response.statusText
+      )
+    );
+  }
+  return response;
 }
 
 async function readTabVideos(tabId) {
@@ -1580,16 +1728,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (message.type === 'EXTERNAL_HELPER_HEALTHCHECK') {
         const baseUrl = normalizeLocalHelperUrl(message.localHelperUrl);
-        const result = await callLocalHelper(
-          baseUrl,
-          '/health',
-          {},
-          8000
-        );
+        const helper = await detectHelperType(baseUrl, true);
         sendResponse({
           ok: true,
-          baseUrl: result.baseUrl,
-          helper: result.data,
+          baseUrl: helper.baseUrl,
+          helperType: helper.type,
+          helper: helper.details || { service: helper.type },
         });
         return;
       }
@@ -1605,17 +1749,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           throw new Error('No valid source URL was provided for external video download.');
         }
         const baseUrl = normalizeLocalHelperUrl(message.localHelperUrl);
-        const result = await callLocalHelper(baseUrl, '/download-video', {
-          url: preferredUrl,
-          title:
-            typeof message.title === 'string' && message.title.trim()
-              ? message.title.trim()
-              : '',
-          requestedUrl: normalizeHttpUrl(message.url) || '',
-        });
+        const helper = await detectHelperType(baseUrl);
+        let result;
+        if (helper.type === 'youtube-dl-server') {
+          result = await callYoutubeDlServerQueue(baseUrl, {
+            url: preferredUrl,
+            format: 'mp4',
+          });
+        } else {
+          result = await callDevToolkitHelper(baseUrl, '/download-video', {
+            url: preferredUrl,
+            title:
+              typeof message.title === 'string' && message.title.trim()
+                ? message.title.trim()
+                : '',
+            requestedUrl: normalizeHttpUrl(message.url) || '',
+          });
+        }
         sendResponse({
           ok: true,
           baseUrl: result.baseUrl,
+          helperType: helper.type,
           result: result.data,
         });
         return;
@@ -1641,18 +1795,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ? requestedFormat
           : 'mp3';
         const baseUrl = normalizeLocalHelperUrl(message.localHelperUrl);
-        const result = await callLocalHelper(baseUrl, '/extract-audio', {
-          url: preferredUrl,
-          audioFormat: safeAudioFormat,
-          title:
-            typeof message.title === 'string' && message.title.trim()
-              ? message.title.trim()
-              : '',
-          requestedUrl: normalizeHttpUrl(message.url) || '',
-        });
+        const helper = await detectHelperType(baseUrl);
+        let result;
+        if (helper.type === 'youtube-dl-server') {
+          result = await callYoutubeDlServerQueue(baseUrl, {
+            url: preferredUrl,
+            format: safeAudioFormat,
+          });
+        } else {
+          result = await callDevToolkitHelper(baseUrl, '/extract-audio', {
+            url: preferredUrl,
+            audioFormat: safeAudioFormat,
+            title:
+              typeof message.title === 'string' && message.title.trim()
+                ? message.title.trim()
+                : '',
+            requestedUrl: normalizeHttpUrl(message.url) || '',
+          });
+        }
         sendResponse({
           ok: true,
           baseUrl: result.baseUrl,
+          helperType: helper.type,
           result: result.data,
         });
         return;

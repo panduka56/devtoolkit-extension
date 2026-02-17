@@ -51,6 +51,7 @@ This document explains the current runtime architecture, detection pipeline, dow
 - Optional local helper fallback:
   - `yt-dlp` + `ffmpeg` bridge via `tools/local-downloader-server.mjs`
   - Used automatically when direct browser download/audio extraction is not possible
+  - Also supports existing `youtube-dl-server` deployments via `/youtube-dl/q`
 
 ## Detection and Ranking Pipeline
 

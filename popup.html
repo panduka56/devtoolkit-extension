@@ -468,10 +468,10 @@ AI condensed context will appear here after generation.</pre
           </div>
           <hr class="settingsDivider" />
           <div class="cardHead">
-            <h2>Local Downloader Bridge</h2>
+            <h2>Downloader Bridge</h2>
           </div>
           <p class="hint">
-            Optional local helper for one-click `yt-dlp` + `ffmpeg` extraction when direct browser downloads are unavailable.
+            Use either local helper (`/health`) or Unraid `youtube-dl-server` (`/youtube-dl`) for one-click extraction when direct browser downloads are unavailable.
           </p>
           <div class="grid">
             <label class="toggleLabel" for="useLocalDownloaderToggle">
@@ -479,29 +479,29 @@ AI condensed context will appear here after generation.</pre
               <span class="toggleWrap">
                 <input id="useLocalDownloaderToggle" type="checkbox" checked />
                 <i class="toggleTrack"></i>
-                <strong>Enable yt-dlp fallback</strong>
+                <strong>Enable bridge fallback</strong>
               </span>
             </label>
             <label>
-              <span>Helper URL</span>
+              <span>Bridge URL</span>
               <input
                 id="localDownloaderUrlInput"
                 type="text"
                 autocomplete="off"
-                placeholder="http://127.0.0.1:41771"
+                placeholder="http://127.0.0.1:41771 or http://192.168.4.15:38086"
                 value="http://127.0.0.1:41771"
               />
             </label>
           </div>
           <div class="localDownloaderActions">
             <button id="saveLocalDownloaderUrlButton" class="actionBtn" type="button">
-              Save Helper URL
+              Save Bridge URL
             </button>
             <button id="testLocalDownloaderButton" class="actionBtn" type="button">
-              Test Helper
+              Test Bridge
             </button>
           </div>
-          <p id="localDownloaderStatus" class="statusLine">Local helper status: idle</p>
+          <p id="localDownloaderStatus" class="statusLine">Downloader bridge status: idle</p>
           <p id="settingsStatus" class="statusLine">Settings status: idle</p>
         </section>
       </section>

@@ -27,11 +27,19 @@ For YouTube/TikTok and other stream types that are not directly downloadable in-
 2. Start helper:
    - `node tools/local-downloader-server.mjs`
 3. In extension `Settings`:
-   - Enable `yt-dlp fallback`
+   - Enable bridge fallback
    - Keep URL as `http://127.0.0.1:41771`
-   - Click `Test Helper`
+   - Click `Test Bridge`
 
 When direct download is unavailable, `Download` / `Audio` buttons automatically fall back to local extraction.
+
+### Use Existing Unraid `youtube-dl-server`
+
+If you already run `youtube-dl-server` (like `http://192.168.4.15:38086`), set that as the Bridge URL in Settings and click `Test Bridge`.
+
+The extension auto-detects helper type:
+- `DevToolkit helper`: expects `/health`, `/download-video`, `/extract-audio`
+- `youtube-dl-server`: expects `/youtube-dl` and queues via `/youtube-dl/q`
 
 ## Docs
 

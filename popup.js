@@ -583,12 +583,12 @@ function getLocalDownloaderConfig() {
 function saveLocalDownloaderConfig() {
   saveSettings();
   const config = getLocalDownloaderConfig();
-  setLocalDownloaderStatus(`Local helper URL saved: ${config.baseUrl}`, 'success');
+  setLocalDownloaderStatus(`Bridge URL saved: ${config.baseUrl}`, 'success');
 }
 
 async function testLocalDownloader() {
   const config = getLocalDownloaderConfig();
-  setLocalDownloaderStatus('Checking local helper...');
+  setLocalDownloaderStatus('Checking downloader bridge...');
   testLocalDownloaderButton.disabled = true;
   try {
     const response = await chrome.runtime.sendMessage({
@@ -598,15 +598,24 @@ async function testLocalDownloader() {
     if (!response?.ok) {
       throw new Error(response?.error || 'Helper health check failed.');
     }
+    const helperType =
+      typeof response.helperType === 'string' ? response.helperType : 'unknown';
     const helperVersion =
-      typeof response.helper?.version === 'string' ? response.helper.version : 'unknown';
+      typeof response.helper?.version === 'string' ? response.helper.version : '';
+    const helperLabel =
+      helperType === 'youtube-dl-server'
+        ? 'youtube-dl-server'
+        : helperType === 'devtoolkit'
+          ? 'DevToolkit helper'
+          : helperType;
+    const versionSuffix = helperVersion ? `, v${helperVersion}` : '';
     setLocalDownloaderStatus(
-      `Local helper reachable (${response.baseUrl}, v${helperVersion}).`,
+      `Bridge reachable (${helperLabel} at ${response.baseUrl}${versionSuffix}).`,
       'success'
     );
   } catch (error) {
     setLocalDownloaderStatus(
-      `Local helper unavailable: ${error?.message || 'unknown error'}`,
+      `Downloader bridge unavailable: ${error?.message || 'unknown error'}`,
       'error'
     );
   } finally {
@@ -2826,7 +2835,7 @@ function renderVideoList(videos, tabId) {
     if (unavailableReason) {
       if (localFallbackEnabled) {
         dlBtn.textContent = 'yt-dlp';
-        dlBtn.title = `${unavailableReason}. Use local helper fallback.`;
+        dlBtn.title = `${unavailableReason}. Use downloader bridge fallback.`;
         dlBtn.addEventListener('click', () => downloadVideo(video));
       } else {
         dlBtn.textContent = 'Unavailable';
@@ -2848,7 +2857,7 @@ function renderVideoList(videos, tabId) {
       audioBtn.textContent = audioLabel;
       if (!canDownloadMp3(video)) {
         if (localFallbackEnabled) {
-          audioBtn.title = 'Use local helper to extract MP3 from page URL.';
+          audioBtn.title = 'Use downloader bridge to extract MP3 from page URL.';
         } else {
           audioBtn.classList.add('muted');
           audioBtn.title = 'Audio extraction is not possible for this stream.';
@@ -2895,7 +2904,7 @@ async function downloadVideoWithLocalHelper(video) {
     title: video.fileName || '',
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Local helper video download failed.');
+    throw new Error(response?.error || 'Downloader bridge video request failed.');
   }
   return response;
 }
@@ -2912,7 +2921,7 @@ async function extractAudioWithLocalHelper(video, audioFormat = 'mp3') {
     audioFormat,
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Local helper audio extraction failed.');
+    throw new Error(response?.error || 'Downloader bridge audio request failed.');
   }
   return response;
 }
@@ -2944,7 +2953,7 @@ async function downloadVideo(video) {
     if (localFallbackEnabled) {
       try {
         await downloadVideoWithLocalHelper(video);
-        setVideoStatus('yt-dlp fallback started.', 'success');
+        setVideoStatus('Downloader bridge fallback started.', 'success');
         return;
       } catch {
         // Fall through to show original error.
@@ -3198,7 +3207,7 @@ async function initialize() {
   setSettingsStatus('Settings status: idle');
   setVideoStatus('Video status: scanning...');
   setImagesStatus('Image status: scanning...');
-  setLocalDownloaderStatus('Local helper status: idle');
+  setLocalDownloaderStatus('Downloader bridge status: idle');
   contextAiTextEl.textContent = 'AI condensed context will appear here after generation.';
   await Promise.all([refreshPreview(), loadAiConfig(), refreshVideoList(), refreshImageList()]);
 }
