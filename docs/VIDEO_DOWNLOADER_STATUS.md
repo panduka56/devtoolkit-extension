@@ -1,6 +1,6 @@
 # Video Downloader: How It Works and Current Progress
 
-Last updated: 2026-02-15
+Last updated: 2026-02-17
 
 ## Scope
 
@@ -48,6 +48,9 @@ This document explains the current runtime architecture, detection pipeline, dow
   - `Download` for direct valid streams
   - `Unavailable` when stream is known non-direct
   - `MP3` button only when an audio candidate exists; shows clear unavailable state otherwise
+- Optional local helper fallback:
+  - `yt-dlp` + `ffmpeg` bridge via `tools/local-downloader-server.mjs`
+  - Used automatically when direct browser download/audio extraction is not possible
 
 ## Detection and Ranking Pipeline
 
@@ -102,11 +105,13 @@ This document explains the current runtime architecture, detection pipeline, dow
 
 - MP3 direct download path works when parser captures an audio URL that is already MP3.
 - User sees `MP3` action for that row.
+- Direct non-MP3 audio downloads (for example `m4a`/`webm`) are labeled and downloaded as their actual format.
+- Local helper mode can extract MP3 from supported platforms (for personal workflow) without leaving the extension UI.
 
 ### What does not work yet
 
-- True format conversion (AAC/WebM/M4A -> MP3) is not implemented inside extension runtime.
-- When no direct MP3 source exists, UI reports MP3 unavailable.
+- True format conversion inside the extension sandbox (without local helper) is still not implemented.
+- DRM-protected streams remain constrained.
 
 ## Progress Timeline
 

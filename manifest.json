@@ -11,15 +11,18 @@
   "permissions": [
     "storage",
     "tabs",
-    "webRequest",
     "downloads",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "sidePanel",
+    "webRequest"
   ],
   "host_permissions": ["<all_urls>"],
   "action": {
-    "default_title": "DevToolkit",
-    "default_popup": "popup.html"
+    "default_title": "DevToolkit"
+  },
+  "side_panel": {
+    "default_path": "popup.html"
   },
   "background": {
     "service_worker": "background.js",

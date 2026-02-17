@@ -45,7 +45,7 @@
           </div>
           <div>
             <h1>DevToolkit</h1>
-            <p class="sub">Video, console, SEO, AI tools.</p>
+            <p class="sub">Video, images, console, SEO, AI tools.</p>
           </div>
         </div>
         <div class="topbarActions">
@@ -64,6 +64,7 @@
       <nav class="navBar" aria-label="Extension sections">
         <div class="categorySwitch" role="radiogroup" aria-label="Category">
           <button class="categoryBtn is-active" type="button" data-category="video">Video</button>
+          <button class="categoryBtn" type="button" data-category="images">Images</button>
           <button class="categoryBtn" type="button" data-category="console">Console</button>
           <button class="categoryBtn" type="button" data-category="pageintel">Page Intel</button>
           <button class="categoryBtn" type="button" data-category="context">Context</button>
@@ -78,10 +79,78 @@
             <h2>Detected Videos</h2>
             <button id="downloadAllButton" class="actionBtn" type="button" style="display: none;">Download All</button>
           </div>
+          <p class="hint">Direct streams are downloadable. Manifest-only or protected streams are shown as unavailable.</p>
           <div id="videoList" class="videoList">
             <p class="hint">No videos detected on this page. Navigate to a page with video content.</p>
           </div>
           <p id="videoStatus" class="statusLine">Video status: scanning...</p>
+        </section>
+      </section>
+
+      <section id="imagesView" class="view">
+        <section class="card">
+          <div class="cardHead">
+            <h2>Detected Images</h2>
+            <button id="scanImagesButton" class="actionBtn" type="button">Scan Page</button>
+          </div>
+          <p class="hint">Finds images from page tags, lazy-load attributes, CSS backgrounds, and social preview metadata.</p>
+          <div class="grid imageFilters">
+            <label>
+              <span>Quick size preset</span>
+              <select id="imageSizePresetSelect">
+                <option value="medium_plus">Bigger than 600px (recommended)</option>
+                <option value="large_plus">Bigger than 1200px</option>
+                <option value="small_only">Smaller than 600px</option>
+                <option value="all">All sizes</option>
+              </select>
+            </label>
+            <label>
+              <span>Byte-size preset</span>
+              <select id="imageBytesPresetSelect">
+                <option value="any">Any file size</option>
+                <option value="gt_1mb">Bigger than 1 MB</option>
+                <option value="lt_300kb">Smaller than 300 KB</option>
+              </select>
+            </label>
+            <label>
+              <span>Format</span>
+              <select id="imageFormatSelect">
+                <option value="all">All</option>
+                <option value="jpg">JPG/JPEG</option>
+                <option value="png">PNG</option>
+                <option value="webp">WEBP</option>
+                <option value="gif">GIF</option>
+                <option value="svg">SVG</option>
+                <option value="avif">AVIF</option>
+              </select>
+            </label>
+            <label class="toggleLabel" for="imageSameDomainToggle">
+              <span>Domain filter</span>
+              <span class="toggleWrap">
+                <input id="imageSameDomainToggle" type="checkbox" />
+                <i class="toggleTrack"></i>
+                <strong>Same domain only</strong>
+              </span>
+            </label>
+            <label class="toggleLabel" for="imageDedupeToggle">
+              <span>Dedupe</span>
+              <span class="toggleWrap">
+                <input id="imageDedupeToggle" type="checkbox" checked />
+                <i class="toggleTrack"></i>
+                <strong>Canonical URL dedupe</strong>
+              </span>
+            </label>
+          </div>
+          <div class="imageActions">
+            <button id="imageSelectAllButton" class="actionBtn" type="button">Select All</button>
+            <button id="imageSelectNoneButton" class="actionBtn" type="button">Clear Selection</button>
+            <button id="imageDownloadSelectedButton" class="actionBtn primary" type="button">Download Selected</button>
+          </div>
+          <p id="imagesStats" class="statusLine">0 images loaded, 0 selected.</p>
+          <div id="imageList" class="imageList">
+            <p class="hint">No images loaded. Click "Scan Page".</p>
+          </div>
+          <p id="imagesStatus" class="statusLine">Image status: idle</p>
         </section>
       </section>
 
@@ -184,8 +253,7 @@
             <h2>AI Brief From Console</h2>
           </div>
           <p class="hint">
-            Uses captured console payload from Main and your configured
-            AI provider settings.
+            Uses the current Main capture and your configured provider settings to produce a concise debugging brief.
           </p>
           <div class="aiActions">
             <button
@@ -212,13 +280,11 @@ AI brief will appear here after generation.</pre
             <h2>Page Context Pack</h2>
           </div>
           <p class="hint">
-            Scans full rendered page content and key UI elements, then filters
-            it into an AI-ready handoff. Console logs are not used in this
-            mode.
+            Scans rendered page content and key UI elements into an AI-ready handoff pack. Console logs are not used in this mode.
           </p>
           <div class="contextActions">
             <button id="extractContextButton" class="actionBtn primary" type="button">
-              Extract Full Page
+              Scan This Page
             </button>
             <button id="condenseContextButton" class="actionBtn" type="button">
               Generate AI Context Brief
@@ -227,12 +293,24 @@ AI brief will appear here after generation.</pre
               Copy Context Pack
             </button>
           </div>
-          <pre id="contextText">
+          <div class="contextPanels">
+            <article class="contextPanel">
+              <div class="contextPanelHead">
+                <h3>Full Page Context</h3>
+              </div>
+              <pre id="contextText">
 AI context will appear here after generation.</pre
-          >
-          <pre id="contextAiText">
+              >
+            </article>
+            <article class="contextPanel">
+              <div class="contextPanelHead">
+                <h3>AI Short Brief</h3>
+              </div>
+              <pre id="contextAiText">
 AI condensed context will appear here after generation.</pre
-          >
+              >
+            </article>
+          </div>
           <p id="contextStatus" class="statusLine">Context status: idle</p>
         </section>
       </section>
@@ -388,6 +466,42 @@ AI condensed context will appear here after generation.</pre
               </select>
             </label>
           </div>
+          <hr class="settingsDivider" />
+          <div class="cardHead">
+            <h2>Local Downloader Bridge</h2>
+          </div>
+          <p class="hint">
+            Optional local helper for one-click `yt-dlp` + `ffmpeg` extraction when direct browser downloads are unavailable.
+          </p>
+          <div class="grid">
+            <label class="toggleLabel" for="useLocalDownloaderToggle">
+              <span>Fallback mode</span>
+              <span class="toggleWrap">
+                <input id="useLocalDownloaderToggle" type="checkbox" checked />
+                <i class="toggleTrack"></i>
+                <strong>Enable yt-dlp fallback</strong>
+              </span>
+            </label>
+            <label>
+              <span>Helper URL</span>
+              <input
+                id="localDownloaderUrlInput"
+                type="text"
+                autocomplete="off"
+                placeholder="http://127.0.0.1:41771"
+                value="http://127.0.0.1:41771"
+              />
+            </label>
+          </div>
+          <div class="localDownloaderActions">
+            <button id="saveLocalDownloaderUrlButton" class="actionBtn" type="button">
+              Save Helper URL
+            </button>
+            <button id="testLocalDownloaderButton" class="actionBtn" type="button">
+              Test Helper
+            </button>
+          </div>
+          <p id="localDownloaderStatus" class="statusLine">Local helper status: idle</p>
           <p id="settingsStatus" class="statusLine">Settings status: idle</p>
         </section>
       </section>

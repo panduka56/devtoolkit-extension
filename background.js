@@ -5,14 +5,28 @@ import {
   parseAiResponse,
 } from './lib/ai-providers.js';
 
+if (chrome.sidePanel?.setPanelBehavior) {
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: true })
+    .catch(() => {
+      // Ignore if unavailable on older Chrome builds.
+    });
+}
+
 // === Video Link Storage (per tab, persisted across worker restarts) ===
 
 const TAB_VIDEO_DATA_KEY = 'tabVideoDataV1';
+const TAB_IMAGE_DATA_KEY = 'tabImageDataV1';
 const VIDEO_METADATA_TIMEOUT_MS = 8000;
 const videoMetadataInflight = new Map();
+const imageMetadataInflight = new Map();
 
 let tabVideoDataCache = null;
 let tabVideoMutationQueue = Promise.resolve();
+let tabImageDataCache = null;
+let tabImageMutationQueue = Promise.resolve();
+const DEFAULT_LOCAL_HELPER_URL = 'http://127.0.0.1:41771';
+const LOCAL_HELPER_TIMEOUT_MS = 10 * 60 * 1000;
 
 function getVideoStorageArea() {
   return chrome.storage.session || chrome.storage.local;
@@ -143,6 +157,17 @@ function canonicalVideoIdentity(video) {
   }
 }
 
+const MIN_VIDEO_DISPLAY_BYTES = 1_500_000; // 1.5MB — omit junk under this size
+const DIRECT_AUDIO_EXTENSIONS = new Set([
+  'mp3',
+  'm4a',
+  'aac',
+  'ogg',
+  'wav',
+  'weba',
+  'webm',
+]);
+
 function looksLikeJunkVideo(video) {
   if (!video?.url) {
     return true;
@@ -159,6 +184,12 @@ function looksLikeJunkVideo(video) {
     return true;
   }
   if (typeof video.contentType === 'string' && /audio\//i.test(video.contentType)) {
+    return true;
+  }
+  // Filter out known-small files (under 1.5MB)
+  // Videos with unknown size (null/0) pass through — size gets resolved later
+  const size = asPositiveInt(video.sizeBytes);
+  if (size && size < MIN_VIDEO_DISPLAY_BYTES) {
     return true;
   }
   return false;
@@ -253,6 +284,8 @@ function normalizeVideoLink(link) {
   const extFromUrl = extractExtFromUrl(url);
   const audioUrl = normalizeHttpUrl(link?.audioUrl);
   const audioExt = audioUrl ? extractExtFromUrl(audioUrl) : '';
+  const audioContentType =
+    typeof link?.audioContentType === 'string' ? link.audioContentType : '';
   const playlist = Boolean(link?.playlist) || isPlaylistUrl(url);
   const fileName = sanitizeFileName(link?.fileName || link?.title || 'video');
 
@@ -278,9 +311,10 @@ function normalizeVideoLink(link) {
     audioExt,
     mp3Available:
       Boolean(link?.mp3Available) ||
-      audioExt === 'mp3' ||
-      /audio\/mpeg/i.test(typeof link?.audioContentType === 'string' ? link.audioContentType : ''),
+      DIRECT_AUDIO_EXTENSIONS.has(audioExt) ||
+      /audio\/(mpeg|mp4|aac|ogg|wav|webm)/i.test(audioContentType),
     source: typeof link?.source === 'string' ? link.source.trim() : '',
+    pageUrl: normalizeHttpUrl(link?.pageUrl) || '',
     hasAudio:
       link?.hasAudio === true ? true : link?.hasAudio === false ? false : null,
     requiresMux: Boolean(link?.requiresMux),
@@ -305,12 +339,142 @@ function mergeVideoLink(existing, incoming) {
     audioExt: incoming.audioExt || existing.audioExt || '',
     mp3Available: Boolean(incoming.mp3Available || existing.mp3Available),
     source: incoming.source || existing.source || '',
+    pageUrl: incoming.pageUrl || existing.pageUrl || '',
     hasAudio:
       incoming.hasAudio === true || incoming.hasAudio === false
         ? incoming.hasAudio
         : existing.hasAudio,
     requiresMux: Boolean(incoming.requiresMux || existing.requiresMux),
     isPrimary: Boolean(incoming.isPrimary || existing.isPrimary),
+    lastSeenAt: Date.now(),
+  };
+}
+
+function extractExtFromContentType(contentType) {
+  if (typeof contentType !== 'string') {
+    return '';
+  }
+  const type = contentType.toLowerCase();
+  if (type.includes('image/jpeg') || type.includes('image/jpg')) return 'jpg';
+  if (type.includes('image/png')) return 'png';
+  if (type.includes('image/webp')) return 'webp';
+  if (type.includes('image/gif')) return 'gif';
+  if (type.includes('image/svg')) return 'svg';
+  if (type.includes('image/avif')) return 'avif';
+  if (type.includes('image/bmp')) return 'bmp';
+  if (type.includes('image/tiff')) return 'tiff';
+  return '';
+}
+
+function canonicalImageIdentity(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    parsed.search = '';
+    return `${parsed.hostname.toLowerCase()}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+function scoreImageCandidate(image) {
+  const width = asPositiveInt(image?.width) || 0;
+  const height = asPositiveInt(image?.height) || 0;
+  const area = width * height;
+  const sizeBytes = asPositiveInt(image?.sizeBytes) || 0;
+  const source = typeof image?.source === 'string' ? image.source : '';
+  let score = area;
+  score += Math.min(Math.floor(sizeBytes / 1024), 5000);
+  if (source.includes('img-currentSrc')) score += 450;
+  else if (source.includes('img-src')) score += 360;
+  else if (source.includes('picture')) score += 300;
+  else if (source.includes('meta-')) score += 180;
+  else if (source.includes('style-background')) score += 120;
+  return score;
+}
+
+function curateImagesForDisplay(images) {
+  if (!Array.isArray(images) || images.length === 0) {
+    return [];
+  }
+  const deduped = new Map();
+  for (const candidate of images) {
+    if (!candidate?.url) continue;
+    const key = candidate.url;
+    const existing = deduped.get(key);
+    if (!existing || scoreImageCandidate(candidate) > scoreImageCandidate(existing)) {
+      deduped.set(key, candidate);
+    }
+  }
+  return Array.from(deduped.values())
+    .sort((a, b) => scoreImageCandidate(b) - scoreImageCandidate(a))
+    .slice(0, 300);
+}
+
+function normalizeImageLink(link) {
+  const url = normalizeHttpUrl(link?.url);
+  if (!url) {
+    return null;
+  }
+  const width = asPositiveInt(link?.width ?? link?.naturalWidth ?? null);
+  const height = asPositiveInt(link?.height ?? link?.naturalHeight ?? null);
+  const sizeBytes = asPositiveInt(
+    link?.sizeBytes ?? link?.contentLength ?? link?.filesize ?? null
+  );
+  const contentType =
+    typeof link?.contentType === 'string' ? link.contentType.trim() : '';
+  const extFromUrl = extractExtFromUrl(url);
+  const extFromType = extractExtFromContentType(contentType);
+  const formatFromLink =
+    typeof link?.format === 'string' ? link.format.trim().toLowerCase() : '';
+  const normalizedFormat = formatFromLink === 'jpeg' ? 'jpg' : formatFromLink;
+  const ext = extFromUrl || extFromType || normalizedFormat || '';
+
+  return {
+    id:
+      typeof link?.id === 'string' && link.id.trim()
+        ? link.id.trim()
+        : `img_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`,
+    url,
+    canonicalUrl: canonicalImageIdentity(url),
+    fileName: sanitizeFileName(link?.fileName || link?.title || 'image') || 'image',
+    source: typeof link?.source === 'string' ? link.source.trim() : '',
+    width,
+    height,
+    altText:
+      typeof link?.altText === 'string' ? link.altText.trim().slice(0, 240) : '',
+    titleText:
+      typeof link?.titleText === 'string' ? link.titleText.trim().slice(0, 240) : '',
+    contentType,
+    sizeBytes,
+    sizeText: sizeBytes ? formatBytes(sizeBytes) : '',
+    ext,
+    format: ext,
+    lastSeenAt: Date.now(),
+  };
+}
+
+function mergeImageLink(existing, incoming) {
+  const existingSize = asPositiveInt(existing?.sizeBytes);
+  const incomingSize = asPositiveInt(incoming?.sizeBytes);
+  const width = Math.max(asPositiveInt(existing?.width) || 0, asPositiveInt(incoming?.width) || 0) || null;
+  const height = Math.max(asPositiveInt(existing?.height) || 0, asPositiveInt(incoming?.height) || 0) || null;
+  const sizeBytes = incomingSize || existingSize || null;
+  return {
+    ...existing,
+    ...incoming,
+    canonicalUrl: incoming.canonicalUrl || existing.canonicalUrl || canonicalImageIdentity(incoming.url || existing.url || ''),
+    fileName: incoming.fileName || existing.fileName || 'image',
+    source: incoming.source || existing.source || '',
+    width,
+    height,
+    altText: incoming.altText || existing.altText || '',
+    titleText: incoming.titleText || existing.titleText || '',
+    contentType: incoming.contentType || existing.contentType || '',
+    sizeBytes,
+    sizeText: incoming.sizeText || existing.sizeText || (sizeBytes ? formatBytes(sizeBytes) : ''),
+    ext: incoming.ext || existing.ext || '',
+    format: incoming.format || existing.format || '',
     lastSeenAt: Date.now(),
   };
 }
@@ -339,6 +503,30 @@ function runVideoMutation(task) {
   return run;
 }
 
+async function loadTabImageData() {
+  if (tabImageDataCache && typeof tabImageDataCache === 'object') {
+    return tabImageDataCache;
+  }
+  const storageArea = getVideoStorageArea();
+  const stored = await storageArea.get(TAB_IMAGE_DATA_KEY);
+  const parsed = stored[TAB_IMAGE_DATA_KEY];
+  tabImageDataCache =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  return tabImageDataCache;
+}
+
+async function saveTabImageData(nextData) {
+  tabImageDataCache = nextData;
+  const storageArea = getVideoStorageArea();
+  await storageArea.set({ [TAB_IMAGE_DATA_KEY]: nextData });
+}
+
+function runImageMutation(task) {
+  const run = tabImageMutationQueue.then(task, task);
+  tabImageMutationQueue = run.catch(() => {});
+  return run;
+}
+
 async function setBadgeForTab(tabId, count) {
   if (!Number.isInteger(tabId)) {
     return;
@@ -356,6 +544,73 @@ async function setBadgeForTab(tabId, count) {
     }
   } catch {
     // Tab can disappear during async updates.
+  }
+}
+
+function normalizeLocalHelperUrl(value) {
+  const raw =
+    typeof value === 'string' && value.trim()
+      ? value.trim()
+      : DEFAULT_LOCAL_HELPER_URL;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return DEFAULT_LOCAL_HELPER_URL;
+    }
+    parsed.pathname = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.href.replace(/\/$/, '');
+  } catch {
+    return DEFAULT_LOCAL_HELPER_URL;
+  }
+}
+
+async function callLocalHelper(baseUrl, pathName, payload, timeoutMs = LOCAL_HELPER_TIMEOUT_MS) {
+  const normalizedBase = normalizeLocalHelperUrl(baseUrl);
+  const endpoint = new URL(pathName, `${normalizedBase}/`).href;
+  const abortController = new AbortController();
+  const timerId = setTimeout(() => {
+    abortController.abort();
+  }, timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+      signal: abortController.signal,
+    });
+    const text = await response.text();
+    let parsed = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = { message: text.slice(0, 500) };
+      }
+    }
+    if (!response.ok) {
+      const reason =
+        parsed?.error ||
+        parsed?.message ||
+        `${response.status} ${response.statusText}`;
+      throw new Error(`Local helper failed: ${reason}`);
+    }
+    return {
+      baseUrl: normalizedBase,
+      endpoint,
+      data: parsed || { ok: true },
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Local helper request timed out.');
+    }
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error('Local helper request failed.');
+  } finally {
+    clearTimeout(timerId);
   }
 }
 
@@ -404,6 +659,9 @@ async function addVideoLinks(tabId, videoLinks) {
     for (const rawLink of videoLinks) {
       const normalized = normalizeVideoLink(rawLink);
       if (!normalized) continue;
+      // Skip known-small files immediately (under 1.5MB)
+      const knownSize = asPositiveInt(normalized.sizeBytes);
+      if (knownSize && knownSize < MIN_VIDEO_DISPLAY_BYTES) continue;
       const key = buildVideoKey(normalized);
       const existing = merged.get(key);
       merged.set(key, existing ? mergeVideoLink(existing, normalized) : normalized);
@@ -435,6 +693,74 @@ async function clearTabVideos(tabId) {
     }
   });
   await setBadgeForTab(Number(tabId), 0);
+}
+
+async function readTabImages(tabId) {
+  const tabKey = normalizeTabId(tabId);
+  if (!tabKey) {
+    return { images: [] };
+  }
+  const allData = await loadTabImageData();
+  const current = allData[tabKey];
+  if (!current || !Array.isArray(current.images)) {
+    return { images: [] };
+  }
+  return {
+    images: curateImagesForDisplay(current.images),
+  };
+}
+
+async function addImageLinks(tabId, imageLinks) {
+  if (!Number.isInteger(tabId) || !Array.isArray(imageLinks) || imageLinks.length === 0) {
+    return;
+  }
+  const tabKey = normalizeTabId(tabId);
+  if (!tabKey) {
+    return;
+  }
+
+  await runImageMutation(async () => {
+    const allData = await loadTabImageData();
+    const current =
+      allData[tabKey] && Array.isArray(allData[tabKey].images)
+        ? allData[tabKey]
+        : { images: [], updatedAt: 0 };
+    const merged = new Map();
+    for (const existing of current.images) {
+      if (!existing || typeof existing !== 'object') continue;
+      const normalizedExisting = normalizeImageLink(existing);
+      if (!normalizedExisting) continue;
+      merged.set(normalizedExisting.url, normalizedExisting);
+    }
+
+    for (const rawImage of imageLinks) {
+      const normalized = normalizeImageLink(rawImage);
+      if (!normalized) continue;
+      const key = normalized.url;
+      const existing = merged.get(key);
+      merged.set(key, existing ? mergeImageLink(existing, normalized) : normalized);
+    }
+
+    allData[tabKey] = {
+      images: Array.from(merged.values()),
+      updatedAt: Date.now(),
+    };
+    await saveTabImageData(allData);
+  });
+}
+
+async function clearTabImages(tabId) {
+  const tabKey = normalizeTabId(tabId);
+  if (!tabKey) {
+    return;
+  }
+  await runImageMutation(async () => {
+    const allData = await loadTabImageData();
+    if (allData[tabKey]) {
+      delete allData[tabKey];
+      await saveTabImageData(allData);
+    }
+  });
 }
 
 function parseContentLength(headers) {
@@ -602,16 +928,188 @@ async function getVideoMetadata(tabId, url) {
   return nextMetadata;
 }
 
+function buildImageMetadata(image, fallbackUrl = '') {
+  const url = image?.url || fallbackUrl;
+  const sizeBytes = asPositiveInt(image?.sizeBytes);
+  const width = asPositiveInt(image?.width);
+  const height = asPositiveInt(image?.height);
+  return {
+    ext: image?.ext || extractExtFromUrl(url),
+    format: image?.format || image?.ext || extractExtFromUrl(url),
+    contentType: image?.contentType || '',
+    sizeBytes,
+    sizeText: sizeBytes ? formatBytes(sizeBytes) : '',
+    width: width || null,
+    height: height || null,
+    altText: image?.altText || '',
+    titleText: image?.titleText || '',
+  };
+}
+
+async function getImageMetadata(tabId, url) {
+  const normalizedUrl = normalizeHttpUrl(url);
+  if (!normalizedUrl) {
+    throw new Error('Invalid image URL.');
+  }
+  const tabKey = normalizeTabId(tabId);
+  const allData = await loadTabImageData();
+  const tab = tabKey ? allData[tabKey] : null;
+  const images = Array.isArray(tab?.images) ? tab.images : [];
+  const index = images.findIndex((image) => image && image.url === normalizedUrl);
+  const existingImage = index >= 0 ? images[index] : null;
+  const existingMetadata = buildImageMetadata(existingImage, normalizedUrl);
+
+  if (existingMetadata.sizeBytes && existingMetadata.contentType) {
+    return existingMetadata;
+  }
+
+  let inflight = imageMetadataInflight.get(normalizedUrl);
+  if (!inflight) {
+    inflight = fetchVideoMetadataFromNetwork(normalizedUrl).finally(() => {
+      imageMetadataInflight.delete(normalizedUrl);
+    });
+    imageMetadataInflight.set(normalizedUrl, inflight);
+  }
+  const fetched = await inflight;
+
+  const nextSizeBytes = fetched.sizeBytes || existingMetadata.sizeBytes || null;
+  const nextContentType = fetched.contentType || existingMetadata.contentType || '';
+  const nextMetadata = {
+    ...existingMetadata,
+    sizeBytes: nextSizeBytes,
+    sizeText: nextSizeBytes ? formatBytes(nextSizeBytes) : '',
+    contentType: nextContentType,
+    ext:
+      existingMetadata.ext ||
+      extractExtFromContentType(nextContentType) ||
+      extractExtFromUrl(normalizedUrl),
+  };
+  nextMetadata.format = nextMetadata.ext || nextMetadata.format || '';
+
+  if (index >= 0) {
+    await runImageMutation(async () => {
+      const freshAllData = await loadTabImageData();
+      const freshTab = freshAllData[tabKey];
+      if (!freshTab || !Array.isArray(freshTab.images)) {
+        return;
+      }
+      const freshIndex = freshTab.images.findIndex(
+        (image) => image && image.url === normalizedUrl
+      );
+      if (freshIndex < 0) {
+        return;
+      }
+      const freshImages = freshTab.images.slice();
+      freshImages[freshIndex] = {
+        ...freshImages[freshIndex],
+        sizeBytes: nextMetadata.sizeBytes,
+        sizeText: nextMetadata.sizeText,
+        contentType: nextMetadata.contentType,
+        ext: nextMetadata.ext,
+        format: nextMetadata.format,
+      };
+      freshAllData[tabKey] = {
+        ...freshTab,
+        images: freshImages,
+        updatedAt: Date.now(),
+      };
+      await saveTabImageData(freshAllData);
+    });
+  }
+
+  return nextMetadata;
+}
+
+// === webRequest Video Detection (Layer 1 — most reliable) ===
+
+const VIDEO_CONTENT_TYPES = /^(video\/|application\/x-mpegurl|application\/vnd\.apple\.mpegurl|application\/dash\+xml)/i;
+const VIDEO_URL_PATTERNS = /\.(mp4|webm|m3u8|mpd|mov|m4v|ts)(\?|$)/i;
+const MIN_VIDEO_SIZE = 1_500_000; // 1.5MB — skip junk/tiny files
+const JUNK_URL_PATTERNS = /(?:thumbnail|storyboard|sprite|preview|poster|analytics|tracking|telemetry|subtitle|caption|\.vtt|\.srt|googlesyndication|doubleclick|ads\.|adserver)/i;
+
+function isLikelyVideoResponse(details) {
+  const url = details.url || '';
+  const contentType = (details.responseHeaders || [])
+    .find(h => h.name.toLowerCase() === 'content-type')?.value || '';
+  const contentLength = Number(
+    (details.responseHeaders || [])
+      .find(h => h.name.toLowerCase() === 'content-length')?.value || 0
+  );
+
+  // Skip junk URLs
+  if (JUNK_URL_PATTERNS.test(url)) return false;
+
+  // Skip tiny files
+  if (contentLength > 0 && contentLength < MIN_VIDEO_SIZE) return false;
+
+  if (/application\/octet-stream/i.test(contentType)) {
+    if (VIDEO_URL_PATTERNS.test(url)) return true;
+    if (/[?&](?:mime=video|type=video|itag=\d{2,3}|clen=\d+)/i.test(url)) {
+      return true;
+    }
+    return false;
+  }
+
+  // Match by content-type
+  if (VIDEO_CONTENT_TYPES.test(contentType)) return true;
+
+  // Match by URL pattern
+  if (VIDEO_URL_PATTERNS.test(url)) return true;
+
+  return false;
+}
+
+function extractVideoInfoFromRequest(details) {
+  const url = details.url;
+  const contentType = (details.responseHeaders || [])
+    .find(h => h.name.toLowerCase() === 'content-type')?.value || '';
+  const contentLength = Number(
+    (details.responseHeaders || [])
+      .find(h => h.name.toLowerCase() === 'content-length')?.value || 0
+  );
+
+  const isPlaylist = /\.m3u8(\?|$)|\.mpd(\?|$)|mpegurl|dash\+xml/i.test(url + contentType);
+  const ext = extractExtFromUrl(url);
+
+  return {
+    url,
+    quality: 'N/A',
+    fileName: 'video',
+    playlist: isPlaylist,
+    contentType: contentType.split(';')[0].trim(),
+    sizeBytes: contentLength > 0 ? contentLength : null,
+    ext: ext || '',
+    source: 'webRequest',
+    hasAudio: null,
+  };
+}
+
+if (chrome.webRequest?.onCompleted) {
+  chrome.webRequest.onCompleted.addListener(
+    (details) => {
+      if (!Number.isInteger(details.tabId) || details.tabId < 0) return;
+      if (!isLikelyVideoResponse(details)) return;
+
+      const videoInfo = extractVideoInfoFromRequest(details);
+      void addVideoLinks(details.tabId, [videoInfo]);
+    },
+    { urls: ['<all_urls>'] },
+    ['responseHeaders']
+  );
+}
+
 // Clear videos when tab navigates
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
     void clearTabVideos(tabId);
+    void clearTabImages(tabId);
   }
 });
 
 // Clean up on tab close
 chrome.tabs.onRemoved.addListener((tabId) => {
   void clearTabVideos(tabId);
+  void clearTabImages(tabId);
 });
 
 // === AI Config Helpers (ported from Console Signal background.js) ===
@@ -690,6 +1188,41 @@ function buildUserPrompt({ logsText, context, styleInstruction }) {
     '',
     'Logs:',
     logsText,
+  ].join('\n');
+}
+
+function buildContextCondenseSystemPrompt() {
+  return [
+    'You are an expert technical summarizer.',
+    'Condense page context into a high-signal brief for another AI coding assistant.',
+    'Preserve critical facts, remove noise, and keep it concise.',
+  ].join(' ');
+}
+
+function buildContextCondenseUserPrompt({ pageUrl, contextText }) {
+  return [
+    'Return exactly this structure:',
+    '',
+    '## TL;DR',
+    '- One sentence summary.',
+    '',
+    '## Key Context',
+    '- 4 to 8 bullets with important facts, entities, and numbers.',
+    '',
+    '## What To Ignore',
+    '- Up to 4 bullets for irrelevant/noisy content.',
+    '',
+    '## Suggested Next Prompt',
+    '```text',
+    'One concise prompt another AI can use with this context.',
+    '```',
+    '',
+    'Keep output below 220 words.',
+    '',
+    `Page URL: ${pageUrl || ''}`,
+    '',
+    'Source Context:',
+    contextText,
   ].join('\n');
 }
 
@@ -775,20 +1308,21 @@ async function clearProviderKey(provider) {
     provider: p,
     hasApiKey: Boolean(config.apiKey),
     model: config.model,
+    baseUrl: config.baseUrl,
   };
 }
 
 // === AI Call ===
 
-async function callAiProvider({ provider, apiKey, model, baseUrl, logsText, context }) {
-  const clippedLogs = trimToMaxChars(redactSensitiveText(logsText), 14000);
-  const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildUserPrompt({
-    logsText: clippedLogs,
-    context,
-    styleInstruction: context.styleInstruction,
-  });
-
+async function callAiProviderWithPrompts({
+  provider,
+  apiKey,
+  model,
+  baseUrl,
+  systemPrompt,
+  userPrompt,
+  maxTokens = 900,
+}) {
   const { endpoint, headers, body } = buildFetchOptions({
     provider,
     apiKey,
@@ -796,6 +1330,7 @@ async function callAiProvider({ provider, apiKey, model, baseUrl, logsText, cont
     systemPrompt,
     userPrompt,
     baseUrl,
+    maxTokens,
   });
 
   const providerLabel = AI_PROVIDERS[provider]?.label || provider;
@@ -840,6 +1375,52 @@ async function callAiProvider({ provider, apiKey, model, baseUrl, logsText, cont
   };
 }
 
+async function callAiProvider({ provider, apiKey, model, baseUrl, logsText, context }) {
+  const clippedLogs = trimToMaxChars(redactSensitiveText(logsText), 14000);
+  const systemPrompt = buildSystemPrompt();
+  const userPrompt = buildUserPrompt({
+    logsText: clippedLogs,
+    context,
+    styleInstruction: context.styleInstruction,
+  });
+
+  return callAiProviderWithPrompts({
+    provider,
+    apiKey,
+    model,
+    baseUrl,
+    systemPrompt,
+    userPrompt,
+    maxTokens: 900,
+  });
+}
+
+async function condenseContextWithAi({
+  provider,
+  apiKey,
+  model,
+  baseUrl,
+  contextText,
+  pageUrl,
+}) {
+  const payload = trimToMaxChars(redactSensitiveText(contextText), 12000);
+  const systemPrompt = buildContextCondenseSystemPrompt();
+  const userPrompt = buildContextCondenseUserPrompt({
+    pageUrl,
+    contextText: payload,
+  });
+
+  return callAiProviderWithPrompts({
+    provider,
+    apiKey,
+    model,
+    baseUrl,
+    systemPrompt,
+    userPrompt,
+    maxTokens: 700,
+  });
+}
+
 // === Message Handler ===
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -852,8 +1433,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // --- Video links ---
       if (message.message === 'add-video-links') {
         const tabId = sender.tab?.id;
-        if (tabId && message.videoLinks) {
+        if (Number.isInteger(tabId) && tabId >= 0 && message.videoLinks) {
           await addVideoLinks(tabId, message.videoLinks);
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.message === 'add-image-links') {
+        const tabId = sender.tab?.id;
+        if (Number.isInteger(tabId) && tabId >= 0 && message.imageLinks) {
+          await addImageLinks(tabId, message.imageLinks);
         }
         sendResponse({ ok: true });
         return;
@@ -873,6 +1463,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ? Number(message.tabId)
             : sender.tab?.id;
         const metadata = await getVideoMetadata(tabId, message.url);
+        sendResponse({ ok: true, metadata });
+        return;
+      }
+
+      if (message.type === 'GET_TAB_IMAGES') {
+        const tabId = Number(message.tabId);
+        const data = await readTabImages(tabId);
+        sendResponse({ ok: true, images: data.images });
+        return;
+      }
+
+      if (message.type === 'GET_IMAGE_METADATA') {
+        const tabId =
+          Number.isInteger(Number(message.tabId))
+            ? Number(message.tabId)
+            : sender.tab?.id;
+        const metadata = await getImageMetadata(tabId, message.url);
         sendResponse({ ok: true, metadata });
         return;
       }
@@ -900,6 +1507,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      if (message.type === 'DOWNLOAD_IMAGE') {
+        if (!message.url || typeof message.url !== 'string') {
+          throw new Error('No image URL provided.');
+        }
+        const normalizedUrl = normalizeHttpUrl(message.url);
+        if (!normalizedUrl) {
+          throw new Error('Invalid image URL.');
+        }
+        chrome.downloads.download(
+          {
+            url: normalizedUrl,
+            filename: message.filename || undefined,
+            conflictAction: 'uniquify',
+          },
+          (downloadId) => {
+            if (chrome.runtime.lastError || !Number.isInteger(downloadId)) {
+              sendResponse({
+                ok: false,
+                error:
+                  chrome.runtime.lastError?.message ||
+                  'Image download could not be started for this URL.',
+              });
+              return;
+            }
+            sendResponse({ ok: true, downloadId });
+          }
+        );
+        return;
+      }
+
       if (message.type === 'DOWNLOAD_AUDIO') {
         if (!message.url || typeof message.url !== 'string') {
           throw new Error('No audio URL provided.');
@@ -909,11 +1546,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           throw new Error('Invalid audio URL.');
         }
         const ext = extractExtFromUrl(normalizedUrl);
-        const requireMp3 = message.requireMp3 !== false;
-        if (requireMp3 && ext !== 'mp3') {
+        const requireDirectAudio =
+          message.requireDirectAudio !== false && message.requireMp3 !== false;
+        const isDirectAudio = DIRECT_AUDIO_EXTENSIONS.has(ext);
+        if (requireDirectAudio && !isDirectAudio) {
           sendResponse({
             ok: false,
-            error: 'MP3 extraction is not possible for this stream.',
+            error: 'Direct audio download is not possible for this stream type.',
           });
           return;
         }
@@ -936,6 +1575,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ ok: true, downloadId });
           }
         );
+        return;
+      }
+
+      if (message.type === 'EXTERNAL_HELPER_HEALTHCHECK') {
+        const baseUrl = normalizeLocalHelperUrl(message.localHelperUrl);
+        const result = await callLocalHelper(
+          baseUrl,
+          '/health',
+          {},
+          8000
+        );
+        sendResponse({
+          ok: true,
+          baseUrl: result.baseUrl,
+          helper: result.data,
+        });
+        return;
+      }
+
+      if (message.type === 'EXTERNAL_DOWNLOAD_VIDEO') {
+        const tabUrl = normalizeHttpUrl(sender.tab?.url || '');
+        const preferredUrl =
+          normalizeHttpUrl(message.sourcePageUrl) ||
+          normalizeHttpUrl(message.pageUrl) ||
+          tabUrl ||
+          normalizeHttpUrl(message.url);
+        if (!preferredUrl) {
+          throw new Error('No valid source URL was provided for external video download.');
+        }
+        const baseUrl = normalizeLocalHelperUrl(message.localHelperUrl);
+        const result = await callLocalHelper(baseUrl, '/download-video', {
+          url: preferredUrl,
+          title:
+            typeof message.title === 'string' && message.title.trim()
+              ? message.title.trim()
+              : '',
+          requestedUrl: normalizeHttpUrl(message.url) || '',
+        });
+        sendResponse({
+          ok: true,
+          baseUrl: result.baseUrl,
+          result: result.data,
+        });
+        return;
+      }
+
+      if (message.type === 'EXTERNAL_EXTRACT_AUDIO') {
+        const tabUrl = normalizeHttpUrl(sender.tab?.url || '');
+        const preferredUrl =
+          normalizeHttpUrl(message.sourcePageUrl) ||
+          normalizeHttpUrl(message.pageUrl) ||
+          tabUrl ||
+          normalizeHttpUrl(message.url);
+        if (!preferredUrl) {
+          throw new Error('No valid source URL was provided for external audio extraction.');
+        }
+        const requestedFormat =
+          typeof message.audioFormat === 'string' && message.audioFormat.trim()
+            ? message.audioFormat.trim().toLowerCase()
+            : 'mp3';
+        const safeAudioFormat = ['mp3', 'm4a', 'aac', 'wav', 'opus', 'flac'].includes(
+          requestedFormat
+        )
+          ? requestedFormat
+          : 'mp3';
+        const baseUrl = normalizeLocalHelperUrl(message.localHelperUrl);
+        const result = await callLocalHelper(baseUrl, '/extract-audio', {
+          url: preferredUrl,
+          audioFormat: safeAudioFormat,
+          title:
+            typeof message.title === 'string' && message.title.trim()
+              ? message.title.trim()
+              : '',
+          requestedUrl: normalizeHttpUrl(message.url) || '',
+        });
+        sendResponse({
+          ok: true,
+          baseUrl: result.baseUrl,
+          result: result.data,
+        });
         return;
       }
 
@@ -1053,6 +1772,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           summary: summaryResult.summary,
           usage: summaryResult.usage,
           model: summaryResult.model,
+        });
+        return;
+      }
+
+      if (message.type === 'AI_CONDENSE_CONTEXT') {
+        const provider = message.provider || (await getActiveProvider());
+        const config = await getProviderConfig(provider);
+        const apiKey = config.apiKey;
+        const model =
+          typeof message.model === 'string' && message.model.trim()
+            ? message.model.trim()
+            : config.model;
+
+        if (AI_PROVIDERS[provider]?.authType !== 'none' && !apiKey) {
+          throw new Error(
+            `No API key saved for ${AI_PROVIDERS[provider]?.label || provider}.`
+          );
+        }
+        if (!message.contextText || typeof message.contextText !== 'string') {
+          throw new Error('No page context provided.');
+        }
+
+        const result = await condenseContextWithAi({
+          provider,
+          apiKey,
+          model,
+          baseUrl: config.baseUrl,
+          contextText: message.contextText,
+          pageUrl: message.pageUrl || sender.tab?.url || '',
+        });
+
+        sendResponse({
+          ok: true,
+          summary: result.summary,
+          usage: result.usage,
+          model: result.model,
         });
         return;
       }

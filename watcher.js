@@ -4,6 +4,61 @@
   if (window.__devToolkitWatcherInstalled) return;
   window.__devToolkitWatcherInstalled = true;
 
+  const MAX_CAPTURE_BYTES = 5_000_000;
+  const FORCE_CAPTURE_URL_RE = /(\.m3u8|\.mpd)(\?|$)|streamingdata|video_info|aweme|reddit_video|manifest|playlist/i;
+  const BINARY_URL_RE =
+    /\.(png|jpe?g|gif|webp|avif|svg|ico|mp4|webm|mov|mp3|wav|ogg|zip|pdf|woff2?|ttf|otf)(\?|$)/i;
+  const TEXT_LIKE_CONTENT_TYPE_RE =
+    /(json|javascript|text\/|xml|application\/x-mpegurl|application\/vnd\.apple\.mpegurl|application\/dash\+xml|mpegurl)/i;
+  const BINARY_CONTENT_TYPE_RE =
+    /(image\/|audio\/|video\/|font\/|application\/octet-stream|application\/zip|application\/pdf)/i;
+
+  function parseContentLength(value) {
+    const parsed = Number.parseInt(String(value || ''), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function resolveRequestUrl(rawUrl) {
+    if (typeof rawUrl !== 'string' || !rawUrl) {
+      return '';
+    }
+    try {
+      return new URL(rawUrl, document.location.href).href;
+    } catch {
+      return rawUrl;
+    }
+  }
+
+  function shouldCapturePayload({ url, contentType, contentLength, responseType }) {
+    const normalizedUrl = typeof url === 'string' ? url : '';
+    const type = typeof contentType === 'string' ? contentType.toLowerCase() : '';
+    const length = parseContentLength(contentLength);
+    const typeHint = typeof responseType === 'string' ? responseType.toLowerCase() : '';
+
+    if (FORCE_CAPTURE_URL_RE.test(normalizedUrl)) {
+      return true;
+    }
+    if (BINARY_URL_RE.test(normalizedUrl)) {
+      return false;
+    }
+    if (typeHint && typeHint !== 'text' && typeHint !== '' && typeHint !== 'json' && typeHint !== 'document') {
+      return false;
+    }
+    if (length && length > MAX_CAPTURE_BYTES) {
+      return false;
+    }
+    if (!type) {
+      return true;
+    }
+    if (BINARY_CONTENT_TYPE_RE.test(type)) {
+      return false;
+    }
+    if (TEXT_LIKE_CONTENT_TYPE_RE.test(type)) {
+      return true;
+    }
+    return false;
+  }
+
   // === XHR Interception ===
 
   const originalOpen = XMLHttpRequest.prototype.open;
@@ -25,22 +80,48 @@
 
   XMLHttpRequest.prototype.send = function (body) {
     this.addEventListener('load', function () {
-      const url = this._dtUrl ? this._dtUrl.toLowerCase() : this._dtUrl;
+      const fullUrl = resolveRequestUrl(this._dtUrl || '');
+      const url = fullUrl ? fullUrl.toLowerCase() : '';
       if (!url) return;
+
+      let contentType = '';
+      let contentLength = '';
+      try {
+        contentType = this.getResponseHeader('content-type') || '';
+        contentLength = this.getResponseHeader('content-length') || '';
+      } catch {
+        contentType = '';
+        contentLength = '';
+      }
+
+      if (
+        !shouldCapturePayload({
+          url,
+          contentType,
+          contentLength,
+          responseType: this.responseType,
+        })
+      ) {
+        return;
+      }
 
       let responseText = '';
       try {
-        responseText = this.responseText;
+        if (this.responseType === 'json' && this.response && typeof this.response === 'object') {
+          responseText = JSON.stringify(this.response);
+        } else {
+          responseText = this.responseText;
+        }
       } catch (e) {
         responseText = '';
       }
 
-      if (!responseText) return;
+      if (!responseText || responseText.length > MAX_CAPTURE_BYTES) return;
 
       window.dispatchEvent(new CustomEvent('__dt_xhr_response', {
         detail: {
           url: this._dtUrl,
-          fullUrl: this._dtUrl.startsWith('http') ? this._dtUrl : document.location.origin + this._dtUrl,
+          fullUrl,
           responseText,
           hostname: document.location.hostname,
         },
@@ -57,15 +138,29 @@
     const response = await originalFetch.apply(this, args);
 
     try {
-      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-      if (url) {
+      const inputUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+      const fullUrl = resolveRequestUrl(inputUrl || response.url || '');
+      if (fullUrl) {
+        const contentType = response.headers?.get('content-type') || '';
+        const contentLength = response.headers?.get('content-length') || '';
+        if (
+          !shouldCapturePayload({
+            url: fullUrl.toLowerCase(),
+            contentType,
+            contentLength,
+            responseType: '',
+          })
+        ) {
+          return response;
+        }
+
         const clone = response.clone();
         clone.text().then(text => {
-          if (text) {
+          if (text && text.length <= MAX_CAPTURE_BYTES) {
             window.dispatchEvent(new CustomEvent('__dt_xhr_response', {
               detail: {
-                url,
-                fullUrl: url.startsWith('http') ? url : document.location.origin + url,
+                url: inputUrl,
+                fullUrl,
                 responseText: text,
                 hostname: document.location.hostname,
               },
@@ -184,23 +279,110 @@
     return '';
   }
 
+  function detectAudioExtension(urlValue, mimeType = '') {
+    const url = typeof urlValue === 'string' ? urlValue.toLowerCase() : '';
+    const mime = typeof mimeType === 'string' ? mimeType.toLowerCase() : '';
+    if (/\.mp3(\?|$)/i.test(url) || /audio\/mpeg/i.test(mime)) return 'mp3';
+    if (/\.m4a(\?|$)|\.mp4(\?|$)/i.test(url) || /audio\/mp4/i.test(mime)) return 'm4a';
+    if (/\.aac(\?|$)/i.test(url) || /audio\/aac/i.test(mime)) return 'aac';
+    if (/\.ogg(\?|$)/i.test(url) || /audio\/ogg/i.test(mime)) return 'ogg';
+    if (/\.wav(\?|$)/i.test(url) || /audio\/wav/i.test(mime)) return 'wav';
+    if (/\.weba(\?|$)/i.test(url)) return 'weba';
+    if (/\.webm(\?|$)/i.test(url) || /audio\/webm/i.test(mime)) return 'webm';
+    return '';
+  }
+
   // === Site-Specific Parsers (Inlined) ===
 
   // --- Instagram Parser ---
   const instagramParser = {
     origins: ['www.instagram.com'],
     onLoad(responseText, requestUrl) {
-      if (document.location.href.match(/https?:\/\/.+\/(stories(\/highlights)?)\/.+/)) return;
-      if (document.location.href.match(/https?:\/\/.+\/(p|reels?)\/.+/)) return;
-      if (!responseText.match('video_versions')) return;
+      // Check for any video-related content in the response
+      if (
+        !responseText.includes('video_versions') &&
+        !responseText.includes('video_url') &&
+        !responseText.includes('video_dash_manifest') &&
+        !responseText.includes('"is_video":true')
+      ) {
+        return;
+      }
 
+      let data = null;
       try {
-        const data = JSON.parse(responseText.replaceAll('for (;;);', ''));
-        const videoVersions = searchKeyRecursive(data, 'video_versions');
-        if (videoVersions && videoVersions.length) {
-          window.dispatchEvent(new CustomEvent('videos-found', { detail: videoVersions }));
+        const cleaned = responseText
+          .replace(/^for\s*\(;;\)\s*;\s*/g, '')
+          .replace(/^while\s*\(\s*1\s*\)\s*;\s*/g, '')
+          .replace(/^[)\]\}'\s]+/, '');
+        data = JSON.parse(cleaned);
+      } catch {
+        // Try extracting JSON from inside the response
+        const jsonStart = responseText.indexOf('{');
+        if (jsonStart >= 0) {
+          try {
+            data = JSON.parse(responseText.substring(jsonStart));
+          } catch { return; }
+        } else {
+          return;
         }
-      } catch (e) { /* ignore parse errors */ }
+      }
+
+      const videos = [];
+      const seen = new Set();
+      const pageTitle = document.title.replace(/\s*[•|·@].*$/, '').trim() || 'instagram_video';
+      const pageThumbnail = (
+        document.querySelector('meta[property="og:image"]')?.getAttribute('content') || ''
+      ).trim();
+
+      // Recursively find all video_versions arrays
+      const videoVersions = searchKeyRecursive(data, 'video_versions');
+      if (videoVersions && videoVersions.length) {
+        for (let g = 0; g < videoVersions.length; g++) {
+          const group = videoVersions[g];
+          if (!Array.isArray(group)) continue;
+          for (let v = 0; v < group.length; v++) {
+            const ver = group[v];
+            const url = resolveUrl(requestUrl, ver.url || '');
+            if (!url || seen.has(url)) continue;
+            seen.add(url);
+            const height = Number(ver.height) || 0;
+            videos.push({
+              fileName: pageTitle,
+              url,
+              quality: height > 0 ? `${height}p` : 'N/A',
+              thumbnailUrl: pageThumbnail,
+              source: 'instagram',
+              hasAudio: true,
+            });
+          }
+        }
+      }
+
+      // Also look for direct video_url fields
+      const videoUrls = searchKeyRecursive(data, 'video_url');
+      if (videoUrls && videoUrls.length) {
+        for (let u = 0; u < videoUrls.length; u++) {
+          const rawUrl = typeof videoUrls[u] === 'string' ? videoUrls[u] : '';
+          const url = resolveUrl(requestUrl, rawUrl);
+          if (!url || seen.has(url)) continue;
+          seen.add(url);
+          videos.push({
+            fileName: pageTitle,
+            url,
+            quality: 'N/A',
+            thumbnailUrl: pageThumbnail,
+            source: 'instagram',
+            hasAudio: true,
+          });
+        }
+      }
+
+      if (videos.length) {
+        // Sort highest quality first, mark best as primary
+        videos.sort((a, b) => qualityToPixels(b.quality) - qualityToPixels(a.quality));
+        videos[0].isPrimary = true;
+        window.dispatchEvent(new CustomEvent('videos-found', { detail: videos.slice(0, 8) }));
+      }
     },
   };
 
@@ -334,12 +516,20 @@
       try {
         data = JSON.parse(responseText);
       } catch {
-        const cleaned = responseText.replace(/^[)\]\}'\s]+/, '');
-        try {
-          data = JSON.parse(cleaned);
-        } catch {
-          return;
+        // Try multiple cleanup strategies
+        const strategies = [
+          () => responseText.replace(/^[)\]\}'\s]+/, ''),
+          () => responseText.substring(responseText.indexOf('{')),
+          () => responseText.substring(responseText.indexOf('[')),
+          () => responseText.replace(/^\xEF\xBB\xBF/, '').trim(), // BOM removal
+        ];
+        for (const strategy of strategies) {
+          try {
+            const cleaned = strategy();
+            if (cleaned) { data = JSON.parse(cleaned); break; }
+          } catch { /* try next */ }
         }
+        if (!data) return;
       }
 
       const awemeItems = [];
@@ -415,10 +605,18 @@
             aweme.music?.play_url ||
               aweme.music?.playUrl ||
               aweme.music?.play_url_hd ||
-              aweme.music?.matched_song?.play_url
+              aweme.music?.matched_song?.play_url ||
+              aweme.music?.play_url_list ||
+              aweme.music?.uri
           )
         );
-        const mp3Available = /\.mp3(\?|$)/i.test(audioUrl);
+        // Track direct downloadable audio format when exposed.
+        const audioIsDirectFile = audioUrl && !/\.m3u8(\?|$)/i.test(audioUrl) && !/\.mpd(\?|$)/i.test(audioUrl);
+        const audioExt = detectAudioExtension(audioUrl);
+        const audioDownloadable = Boolean(audioIsDirectFile) && (
+          Boolean(audioExt) || /audio/i.test(audioUrl)
+        );
+        const normalizedAudioExt = audioExt || (audioDownloadable ? 'm4a' : '');
 
         addTikTokVideo(video.download_addr, (resolved) => ({
           fileName: title,
@@ -428,8 +626,8 @@
           source: 'tiktok',
           hasAudio: true,
           audioUrl,
-          audioExt: mp3Available ? 'mp3' : '',
-          mp3Available,
+          audioExt: normalizedAudioExt,
+          mp3Available: audioDownloadable,
           isPrimary: true,
         }));
 
@@ -441,8 +639,8 @@
           source: 'tiktok',
           hasAudio: true,
           audioUrl,
-          audioExt: mp3Available ? 'mp3' : '',
-          mp3Available,
+          audioExt: normalizedAudioExt,
+          mp3Available: audioDownloadable,
         }));
 
         if (Array.isArray(video.bit_rate)) {
@@ -456,8 +654,8 @@
               source: 'tiktok',
               hasAudio: true,
               audioUrl,
-              audioExt: mp3Available ? 'mp3' : '',
-              mp3Available,
+              audioExt: normalizedAudioExt,
+              mp3Available: audioDownloadable,
             }));
           }
         }
@@ -553,12 +751,19 @@
             bitrate: Number(format.bitrate) || 0,
             sizeBytes: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null,
             mp3Available:
-              /audio\/mpeg/i.test(mimeType) || /\.mp3(\?|$)/i.test(url),
+              /audio\/mpeg/i.test(mimeType) ||
+              /audio\/mp4/i.test(mimeType) ||
+              /\.mp3(\?|$)/i.test(url) ||
+              /\.m4a(\?|$)/i.test(url),
           });
           continue;
         }
         if (!mimeType.includes('video/')) continue;
-        const hasAudio = Boolean(format.audioQuality || format.audioSampleRate);
+        const hasAudio = Boolean(
+          format.audioQuality ||
+          format.audioSampleRate ||
+          (mimeType.includes('video/') && format.audioChannels)
+        );
         const quality = normalizedQuality;
 
         const candidate = {
@@ -587,22 +792,30 @@
       audioOnly.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
       const bestAudio = audioOnly[0] || null;
 
+      // Determine audio extension and mp3 availability from best audio track
+      const audioUrl = bestAudio ? bestAudio.url : '';
+      const audioMime = bestAudio ? bestAudio.mimeType : '';
+      const audioExt = detectAudioExtension(audioUrl, audioMime);
+      const audioMp3Available =
+        Boolean(bestAudio?.mp3Available) ||
+        (Boolean(bestAudio) && (Boolean(audioExt) || /audio\//i.test(audioMime)));
+
       if (progressive.length > 0) {
         for (let i = 0; i < Math.min(progressive.length, 4); i++) {
           videos.push({
             ...progressive[i],
-            audioUrl: bestAudio ? bestAudio.url : '',
-            audioExt: bestAudio ? (bestAudio.url.includes('.mp3') ? 'mp3' : '') : '',
-            mp3Available: Boolean(bestAudio?.mp3Available),
+            audioUrl,
+            audioExt,
+            mp3Available: audioMp3Available,
             isPrimary: i === 0,
           });
         }
       } else if (adaptive.length > 0) {
         videos.push({
           ...adaptive[0],
-          audioUrl: bestAudio ? bestAudio.url : '',
-          audioExt: bestAudio ? (bestAudio.url.includes('.mp3') ? 'mp3' : '') : '',
-          mp3Available: Boolean(bestAudio?.mp3Available),
+          audioUrl,
+          audioExt,
+          mp3Available: audioMp3Available,
           isPrimary: true,
           requiresMux: true,
         });
@@ -629,9 +842,9 @@
             thumbnailUrl,
             source: 'youtube',
             hasAudio: true,
-            audioUrl: bestAudio ? bestAudio.url : '',
-            audioExt: bestAudio ? (bestAudio.url.includes('.mp3') ? 'mp3' : '') : '',
-            mp3Available: Boolean(bestAudio?.mp3Available),
+            audioUrl,
+            audioExt,
+            mp3Available: audioMp3Available,
             isPrimary: true,
             note: `${format} manifest`,
           });
@@ -906,6 +1119,14 @@
   };
 
   // --- Generic media URL parser (JSON/text payloads) ---
+  function extractQualityFromUrl(url) {
+    const match = url.match(/[\/_\-.](\d{3,4})p[\/_\-.?&]/i);
+    if (match) return `${match[1]}p`;
+    const resMatch = url.match(/(\d{3,4})x(\d{3,4})/);
+    if (resMatch) return `${resMatch[2]}p`;
+    return 'N/A';
+  }
+
   const genericUrlParser = {
     origins: [/.*/],
     onLoad(responseText, requestUrl) {
@@ -913,32 +1134,54 @@
         !responseText.includes('.m3u8') &&
         !responseText.includes('.mpd') &&
         !responseText.includes('.mp4') &&
-        !responseText.includes('.webm')
+        !responseText.includes('.webm') &&
+        !responseText.includes('.mov') &&
+        !responseText.includes('.m4v') &&
+        !responseText.includes('.ts') &&
+        !responseText.includes('video_url') &&
+        !responseText.includes('videoUrl') &&
+        !responseText.includes('video_src') &&
+        !responseText.includes('videoSrc') &&
+        !responseText.includes('playback_url') &&
+        !responseText.includes('stream_url') &&
+        !responseText.includes('media_url')
       ) {
         return;
       }
 
       const normalizedText = responseText
         .replace(/\\u0026/g, '&')
-        .replace(/\\\//g, '/');
-      const matches = normalizedText.match(
-        /https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mpd|mp4|webm)(?:\?[^"'\\\s<>]*)?/gi
-      );
-      if (!matches || !matches.length) {
+        .replace(/\\\//g, '/')
+        .replace(/\\u002F/g, '/');
+
+      // Match direct video file URLs
+      const urlPattern = /https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mpd|mp4|webm|mov|m4v|ts)(?:\?[^"'\\\s<>]*)?/gi;
+      const matches = normalizedText.match(urlPattern) || [];
+
+      // Also match common video URL patterns in JSON keys
+      const jsonKeyPattern = /["'](?:video_?url|video_?src|playback_?url|stream_?url|media_?url|play_?url|source_?url|file_?url|download_?url)["']\s*:\s*["'](https?:\/\/[^"']+)["']/gi;
+      let jsonMatch;
+      while ((jsonMatch = jsonKeyPattern.exec(normalizedText)) !== null) {
+        matches.push(jsonMatch[1]);
+      }
+
+      if (!matches.length) {
         return;
       }
 
       const seen = new Set();
       const videos = [];
       for (let i = 0; i < matches.length && i < 60; i++) {
-        const resolved = resolveUrl(requestUrl, matches[i]);
+        const cleaned = matches[i].replace(/\\+$/, '').replace(/['"]+$/, '');
+        const resolved = resolveUrl(requestUrl, cleaned);
         if (!resolved || seen.has(resolved)) continue;
         seen.add(resolved);
         videos.push({
           fileName: document.title || '',
           url: resolved,
           playlist: /\.m3u8(\?|$)|\.mpd(\?|$)/i.test(resolved),
-          quality: 'N/A',
+          quality: extractQualityFromUrl(resolved),
+          source: 'generic',
         });
       }
 
@@ -1018,7 +1261,8 @@
   };
 
   // === Parser Registry ===
-  const parsers = [
+  // Site-specific parsers run first, then generic parsers catch everything else
+  const siteSpecificParsers = [
     instagramParser,
     twitterParser,
     tiktokParser,
@@ -1030,8 +1274,13 @@
     kickParser,
     pornhubParser,
     xvideosParser,
-    genericStreamParser, // Must be last
   ];
+  // Generic parsers always run on every response regardless of site
+  const genericParsers = [
+    genericUrlParser,
+    genericStreamParser,
+  ];
+  const parsers = [...siteSpecificParsers, ...genericParsers];
 
   // === Run Parsers Against Intercepted Responses ===
   window.addEventListener('__dt_xhr_response', function (event) {

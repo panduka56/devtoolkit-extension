@@ -1,13 +1,11 @@
 import {
   AI_PROVIDERS,
-  PROVIDER_STORAGE_KEYS,
-  buildFetchOptions,
-  parseAiResponse,
 } from './lib/ai-providers.js';
 
 // === Navigation constants ===
 const CATEGORIES = {
   video: { label: 'Video', views: ['video'] },
+  images: { label: 'Images', views: ['images'] },
   console: { label: 'Console', views: ['logs', 'brief'] },
   pageintel: { label: 'Page Intel', views: ['seo', 'schema', 'sitemap'] },
   context: { label: 'Context', views: ['context'] },
@@ -16,6 +14,7 @@ const CATEGORIES = {
 
 const VIEW_LABELS = {
   video: 'Downloads',
+  images: 'Images',
   logs: 'Main',
   brief: 'AI Brief',
   seo: 'SEO Meta',
@@ -65,6 +64,11 @@ const ollamaUrlInput = document.getElementById('ollamaUrlInput');
 const apiKeySection = document.getElementById('apiKeySection');
 const ollamaUrlSection = document.getElementById('ollamaUrlSection');
 const saveOllamaUrlButton = document.getElementById('saveOllamaUrlButton');
+const useLocalDownloaderToggle = document.getElementById('useLocalDownloaderToggle');
+const localDownloaderUrlInput = document.getElementById('localDownloaderUrlInput');
+const saveLocalDownloaderUrlButton = document.getElementById('saveLocalDownloaderUrlButton');
+const testLocalDownloaderButton = document.getElementById('testLocalDownloaderButton');
+const localDownloaderStatusEl = document.getElementById('localDownloaderStatus');
 
 const activeFormatEl = document.getElementById('activeFormat');
 const apiKeyStateEl = document.getElementById('apiKeyState');
@@ -89,6 +93,7 @@ const subTabsBar = document.getElementById('subTabsBar');
 
 const viewMap = {
   video: document.getElementById('videoView'),
+  images: document.getElementById('imagesView'),
   logs: document.getElementById('logsView'),
   brief: document.getElementById('briefView'),
   context: document.getElementById('contextView'),
@@ -103,7 +108,22 @@ const videoListEl = document.getElementById('videoList');
 const videoStatusEl = document.getElementById('videoStatus');
 const downloadAllButton = document.getElementById('downloadAllButton');
 
+// === Images Panel DOM ===
+const imageListEl = document.getElementById('imageList');
+const imagesStatusEl = document.getElementById('imagesStatus');
+const imagesStatsEl = document.getElementById('imagesStats');
+const scanImagesButton = document.getElementById('scanImagesButton');
+const imageSelectAllButton = document.getElementById('imageSelectAllButton');
+const imageSelectNoneButton = document.getElementById('imageSelectNoneButton');
+const imageDownloadSelectedButton = document.getElementById('imageDownloadSelectedButton');
+const imageSizePresetSelect = document.getElementById('imageSizePresetSelect');
+const imageBytesPresetSelect = document.getElementById('imageBytesPresetSelect');
+const imageFormatSelect = document.getElementById('imageFormatSelect');
+const imageSameDomainToggle = document.getElementById('imageSameDomainToggle');
+const imageDedupeToggle = document.getElementById('imageDedupeToggle');
+
 const CONTEXT_EXTRACTION_MAX_CHARS = 42000;
+const DEFAULT_LOCAL_HELPER_URL = 'http://127.0.0.1:41771';
 
 const SETTINGS_KEY = 'devtoolkit-settings-v1';
 const DEFAULT_SETTINGS = {
@@ -115,6 +135,13 @@ const DEFAULT_SETTINGS = {
   maxEntries: 500,
   maxCharsPerEntry: 700,
   summaryStyle: 'brief',
+  imageSizePreset: 'medium_plus',
+  imageBytesPreset: 'any',
+  imageFormat: 'all',
+  imageSameDomainOnly: false,
+  imageDedupeCanonical: true,
+  useLocalDownloader: true,
+  localDownloaderUrl: DEFAULT_LOCAL_HELPER_URL,
 };
 
 let lastReport = null;
@@ -126,6 +153,10 @@ let lastGeneratedSummary = '';
 let lastGeneratedContext = '';
 let lastGeneratedContextPageUrl = '';
 let lastCondensedContext = '';
+let allImageCandidates = [];
+let filteredImageCandidates = [];
+let selectedImageUrls = new Set();
+let lastImageTabUrl = '';
 
 function setStatus(message, type = '') {
   statusEl.textContent = message;
@@ -165,6 +196,21 @@ function setVideoStatus(message, type = '') {
   if (type) videoStatusEl.classList.add(type);
 }
 
+function setImagesStatus(message, type = '') {
+  imagesStatusEl.textContent = message;
+  imagesStatusEl.classList.remove('success', 'error');
+  if (type) imagesStatusEl.classList.add(type);
+}
+
+function setLocalDownloaderStatus(message, type = '') {
+  if (!localDownloaderStatusEl) {
+    return;
+  }
+  localDownloaderStatusEl.textContent = message;
+  localDownloaderStatusEl.classList.remove('success', 'error');
+  if (type) localDownloaderStatusEl.classList.add(type);
+}
+
 function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -189,6 +235,25 @@ function parseIntInRange(value, min, max, fallback) {
     return fallback;
   }
   return Math.max(min, Math.min(max, parsed));
+}
+
+function normalizeLocalHelperUrl(value) {
+  const raw =
+    typeof value === 'string' && value.trim()
+      ? value.trim()
+      : DEFAULT_LOCAL_HELPER_URL;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return DEFAULT_LOCAL_HELPER_URL;
+    }
+    parsed.pathname = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.href.replace(/\/$/, '');
+  } catch {
+    return DEFAULT_LOCAL_HELPER_URL;
+  }
 }
 
 function getFormatLabel(format) {
@@ -312,6 +377,26 @@ function readSettingsFromUi() {
       DEFAULT_SETTINGS.maxCharsPerEntry
     ),
     summaryStyle: summaryStyleSelect.value || DEFAULT_SETTINGS.summaryStyle,
+    imageSizePreset:
+      typeof imageSizePresetSelect.value === 'string' &&
+      ['medium_plus', 'large_plus', 'small_only', 'all'].includes(
+        imageSizePresetSelect.value
+      )
+        ? imageSizePresetSelect.value
+        : DEFAULT_SETTINGS.imageSizePreset,
+    imageBytesPreset:
+      typeof imageBytesPresetSelect.value === 'string' &&
+      ['any', 'gt_1mb', 'lt_300kb'].includes(imageBytesPresetSelect.value)
+        ? imageBytesPresetSelect.value
+        : DEFAULT_SETTINGS.imageBytesPreset,
+    imageFormat:
+      typeof imageFormatSelect.value === 'string' && imageFormatSelect.value
+        ? imageFormatSelect.value
+        : DEFAULT_SETTINGS.imageFormat,
+    imageSameDomainOnly: Boolean(imageSameDomainToggle.checked),
+    imageDedupeCanonical: Boolean(imageDedupeToggle.checked),
+    useLocalDownloader: Boolean(useLocalDownloaderToggle?.checked),
+    localDownloaderUrl: normalizeLocalHelperUrl(localDownloaderUrlInput?.value),
   };
 }
 
@@ -323,6 +408,19 @@ function writeSettingsToUi(settings) {
   maxEntriesInput.value = String(settings.maxEntries);
   maxCharsInput.value = String(settings.maxCharsPerEntry);
   summaryStyleSelect.value = settings.summaryStyle;
+  imageSizePresetSelect.value = settings.imageSizePreset;
+  imageBytesPresetSelect.value = settings.imageBytesPreset;
+  imageFormatSelect.value = settings.imageFormat;
+  imageSameDomainToggle.checked = Boolean(settings.imageSameDomainOnly);
+  imageDedupeToggle.checked = Boolean(settings.imageDedupeCanonical);
+  if (useLocalDownloaderToggle) {
+    useLocalDownloaderToggle.checked = Boolean(settings.useLocalDownloader);
+  }
+  if (localDownloaderUrlInput) {
+    localDownloaderUrlInput.value = normalizeLocalHelperUrl(
+      settings.localDownloaderUrl
+    );
+  }
 }
 
 function normalizeSettings(parsed) {
@@ -380,17 +478,79 @@ function normalizeSettings(parsed) {
       ['brief', 'steps', 'rootcause'].includes(parsed.summaryStyle)
         ? parsed.summaryStyle
         : DEFAULT_SETTINGS.summaryStyle,
+    imageSizePreset:
+      parsed &&
+      typeof parsed.imageSizePreset === 'string' &&
+      ['medium_plus', 'large_plus', 'small_only', 'all'].includes(
+        parsed.imageSizePreset
+      )
+        ? parsed.imageSizePreset
+        : parsed && parsed.imageLargeOnly === false
+          ? 'all'
+          : Number(parsed?.imageMinWidth) >= 1200
+            ? 'large_plus'
+          : Number(parsed?.imageMinWidth) > 0
+            ? 'medium_plus'
+              : DEFAULT_SETTINGS.imageSizePreset,
+    imageBytesPreset:
+      parsed &&
+      typeof parsed.imageBytesPreset === 'string' &&
+      ['any', 'gt_1mb', 'lt_300kb'].includes(parsed.imageBytesPreset)
+        ? parsed.imageBytesPreset
+        : DEFAULT_SETTINGS.imageBytesPreset,
+    imageFormat:
+      parsed &&
+      typeof parsed.imageFormat === 'string' &&
+      ['all', 'jpg', 'png', 'webp', 'gif', 'svg', 'avif'].includes(
+        parsed.imageFormat
+      )
+        ? parsed.imageFormat
+        : DEFAULT_SETTINGS.imageFormat,
+    imageSameDomainOnly:
+      parsed && typeof parsed.imageSameDomainOnly === 'boolean'
+        ? parsed.imageSameDomainOnly
+        : DEFAULT_SETTINGS.imageSameDomainOnly,
+    imageDedupeCanonical:
+      parsed && typeof parsed.imageDedupeCanonical === 'boolean'
+        ? parsed.imageDedupeCanonical
+        : DEFAULT_SETTINGS.imageDedupeCanonical,
+    useLocalDownloader:
+      parsed && typeof parsed.useLocalDownloader === 'boolean'
+        ? parsed.useLocalDownloader
+        : DEFAULT_SETTINGS.useLocalDownloader,
+    localDownloaderUrl: normalizeLocalHelperUrl(
+      parsed?.localDownloaderUrl || DEFAULT_SETTINGS.localDownloaderUrl
+    ),
   };
 }
 
-function loadSettings() {
+function getSettingsStorageArea() {
+  return chrome.storage.sync || chrome.storage.local;
+}
+
+async function loadSettings() {
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) {
-      writeSettingsToUi(DEFAULT_SETTINGS);
+    const storageArea = getSettingsStorageArea();
+    const stored = await storageArea.get([SETTINGS_KEY]);
+    const raw = stored?.[SETTINGS_KEY];
+    if (raw && typeof raw === 'object') {
+      writeSettingsToUi(normalizeSettings(raw));
       return;
     }
-    writeSettingsToUi(normalizeSettings(JSON.parse(raw)));
+    try {
+      const legacyRaw = localStorage.getItem(SETTINGS_KEY);
+      if (legacyRaw) {
+        const parsedLegacy = JSON.parse(legacyRaw);
+        const normalizedLegacy = normalizeSettings(parsedLegacy);
+        writeSettingsToUi(normalizedLegacy);
+        await storageArea.set({ [SETTINGS_KEY]: normalizedLegacy });
+        return;
+      }
+    } catch {
+      // Ignore legacy migration errors.
+    }
+    writeSettingsToUi(DEFAULT_SETTINGS);
+    await storageArea.set({ [SETTINGS_KEY]: DEFAULT_SETTINGS });
   } catch {
     writeSettingsToUi(DEFAULT_SETTINGS);
   }
@@ -399,7 +559,7 @@ function loadSettings() {
 function saveSettings() {
   const settings = readSettingsFromUi();
   writeSettingsToUi(settings);
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  void getSettingsStorageArea().set({ [SETTINGS_KEY]: settings });
   updateFormatBadge(settings);
 }
 
@@ -411,6 +571,47 @@ function updateFormatBadge(settings) {
 
 function settingsHash(settings) {
   return JSON.stringify(settings);
+}
+
+function getLocalDownloaderConfig() {
+  return {
+    enabled: Boolean(useLocalDownloaderToggle?.checked),
+    baseUrl: normalizeLocalHelperUrl(localDownloaderUrlInput?.value),
+  };
+}
+
+function saveLocalDownloaderConfig() {
+  saveSettings();
+  const config = getLocalDownloaderConfig();
+  setLocalDownloaderStatus(`Local helper URL saved: ${config.baseUrl}`, 'success');
+}
+
+async function testLocalDownloader() {
+  const config = getLocalDownloaderConfig();
+  setLocalDownloaderStatus('Checking local helper...');
+  testLocalDownloaderButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'EXTERNAL_HELPER_HEALTHCHECK',
+      localHelperUrl: config.baseUrl,
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Helper health check failed.');
+    }
+    const helperVersion =
+      typeof response.helper?.version === 'string' ? response.helper.version : 'unknown';
+    setLocalDownloaderStatus(
+      `Local helper reachable (${response.baseUrl}, v${helperVersion}).`,
+      'success'
+    );
+  } catch (error) {
+    setLocalDownloaderStatus(
+      `Local helper unavailable: ${error?.message || 'unknown error'}`,
+      'error'
+    );
+  } finally {
+    testLocalDownloaderButton.disabled = false;
+  }
 }
 
 function renderStats(report) {
@@ -513,83 +714,88 @@ function getSelectedModel(fallbackModel = '') {
 
 async function getProviderLocalConfig(provider) {
   const p = provider || currentProvider;
-  const config = AI_PROVIDERS[p];
-  if (!config) throw new Error(`Unknown provider: ${p}`);
-
-  const keyField = PROVIDER_STORAGE_KEYS[`${p}_apiKey`];
-  const modelField = PROVIDER_STORAGE_KEYS[`${p}_model`];
-  const baseUrlField = PROVIDER_STORAGE_KEYS[`${p}_baseUrl`];
-
-  const keys = [keyField, modelField, baseUrlField].filter(Boolean);
-  const stored = await chrome.storage.local.get(keys);
-
-  return {
+  if (!AI_PROVIDERS[p]) throw new Error(`Unknown provider: ${p}`);
+  const response = await sendBackgroundMessage({
+    type: 'AI_GET_CONFIG',
     provider: p,
-    apiKey: keyField ? (stored[keyField] || '') : '',
-    model: modelField ? (stored[modelField] || config.defaultModel) : config.defaultModel,
-    baseUrl: baseUrlField ? (stored[baseUrlField] || '') : '',
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Could not read provider settings.');
+  }
+  return {
+    provider: response.provider || p,
+    hasApiKey: Boolean(response.hasApiKey),
+    model: response.model || AI_PROVIDERS[p].defaultModel || '',
+    baseUrl: response.baseUrl || '',
+    activeProvider: response.activeProvider || p,
   };
 }
 
 async function saveProviderLocalConfig({ provider, apiKey, model, baseUrl }) {
   const p = provider || currentProvider;
-  const updates = {};
-
-  if (typeof apiKey === 'string') {
-    const nextKey = apiKey.trim();
-    if (!nextKey) throw new Error('API key is empty.');
-    const keyField = PROVIDER_STORAGE_KEYS[`${p}_apiKey`];
-    if (keyField) updates[keyField] = nextKey;
+  const response = await sendBackgroundMessage({
+    type: 'AI_SAVE_CONFIG',
+    provider: p,
+    apiKey,
+    model,
+    baseUrl,
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Could not save provider settings.');
   }
-
-  if (typeof model === 'string' && model.trim()) {
-    const modelField = PROVIDER_STORAGE_KEYS[`${p}_model`];
-    if (modelField) updates[modelField] = model.trim();
-  }
-
-  if (typeof baseUrl === 'string') {
-    const baseUrlField = PROVIDER_STORAGE_KEYS[`${p}_baseUrl`];
-    if (baseUrlField) updates[baseUrlField] = baseUrl.trim();
-  }
-
-  if (Object.keys(updates).length > 0) {
-    await chrome.storage.local.set(updates);
-  }
-  return getProviderLocalConfig(p);
+  return {
+    provider: response.provider || p,
+    hasApiKey: Boolean(response.hasApiKey),
+    model: response.model || '',
+    baseUrl: response.baseUrl || '',
+  };
 }
 
 async function clearProviderLocalKey(provider) {
   const p = provider || currentProvider;
-  const keyField = PROVIDER_STORAGE_KEYS[`${p}_apiKey`];
-  if (keyField) {
-    await chrome.storage.local.remove(keyField);
+  const response = await sendBackgroundMessage({
+    type: 'AI_CLEAR_KEY',
+    provider: p,
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Could not clear provider key.');
   }
-  return getProviderLocalConfig(p);
+  return {
+    provider: response.provider || p,
+    hasApiKey: Boolean(response.hasApiKey),
+    model: response.model || '',
+    baseUrl: response.baseUrl || '',
+  };
 }
 
 async function setActiveProviderInStorage(provider) {
-  if (!AI_PROVIDERS[provider]) throw new Error(`Unknown provider: ${provider}`);
-  await chrome.storage.local.set({
-    [PROVIDER_STORAGE_KEYS.activeProvider]: provider,
+  if (!AI_PROVIDERS[provider]) {
+    throw new Error(`Unknown provider: ${provider}`);
+  }
+  const response = await sendBackgroundMessage({
+    type: 'AI_SET_PROVIDER',
+    provider,
   });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Could not switch provider.');
+  }
+  return response;
 }
 
 async function loadAiConfig() {
   try {
-    const stored = await chrome.storage.local.get([
-      PROVIDER_STORAGE_KEYS.activeProvider,
-    ]);
-    const activeProvider = stored[PROVIDER_STORAGE_KEYS.activeProvider];
-    currentProvider =
-      typeof activeProvider === 'string' && AI_PROVIDERS[activeProvider]
-        ? activeProvider
-        : 'deepseek';
+    const response = await sendBackgroundMessage({ type: 'AI_GET_CONFIG' });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Could not load AI settings.');
+    }
+    const activeProvider = response.activeProvider;
+    currentProvider = AI_PROVIDERS[activeProvider] ? activeProvider : 'deepseek';
 
     providerSelect.value = currentProvider;
     updateProviderUi(currentProvider);
 
     const config = await getProviderLocalConfig(currentProvider);
-    setApiKeyState(Boolean(config.apiKey));
+    setApiKeyState(Boolean(config.hasApiKey));
 
     if (config.model) {
       if (modelSelect.disabled) {
@@ -632,7 +838,7 @@ async function switchProvider(provider) {
   await setActiveProviderInStorage(provider);
   updateProviderUi(provider);
   const config = await getProviderLocalConfig(provider);
-  setApiKeyState(Boolean(config.apiKey));
+  setApiKeyState(Boolean(config.hasApiKey));
   if (config.model) {
     if (modelSelect.disabled) {
       modelInput.value = config.model;
@@ -901,120 +1107,6 @@ async function generatePageContext() {
   }
 }
 
-function buildContextCondenseSystemPrompt() {
-  return [
-    'You are an expert technical summarizer.',
-    'Condense page context into a high-signal brief for another AI coding assistant.',
-    'Preserve critical facts, remove noise, and keep it concise.',
-  ].join(' ');
-}
-
-function buildContextCondenseUserPrompt({ pageUrl, contextText }) {
-  return [
-    'Return exactly this structure:',
-    '',
-    '## TL;DR',
-    '- One sentence summary.',
-    '',
-    '## Key Context',
-    '- 4 to 8 bullets with important facts, entities, and numbers.',
-    '',
-    '## What To Ignore',
-    '- Up to 4 bullets for irrelevant/noisy content.',
-    '',
-    '## Suggested Next Prompt',
-    '```text',
-    'One concise prompt another AI can use with this context.',
-    '```',
-    '',
-    'Keep output below 220 words.',
-    '',
-    `Page URL: ${pageUrl || ''}`,
-    '',
-    'Source Context:',
-    contextText,
-  ].join('\n');
-}
-
-function trimToMaxChars(text, maxChars) {
-  if (typeof text !== 'string') return '';
-  if (text.length <= maxChars) return text;
-  const hidden = text.length - maxChars;
-  return `${text.slice(0, maxChars)}\n\n... [truncated ${hidden} chars before sending to AI]`;
-}
-
-function redactSensitiveText(input) {
-  if (typeof input !== 'string') return '';
-  return input
-    .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1[REDACTED]')
-    .replace(/sk-[A-Za-z0-9_-]{12,}/g, '[REDACTED_API_KEY]')
-    .replace(/(password|token|secret)\s*[:=]\s*["']?[^"'\s]+/gi, '$1=[REDACTED]');
-}
-
-async function condenseContextViaDirectProvider({
-  provider,
-  apiKey,
-  model,
-  baseUrl,
-  contextText,
-  pageUrl,
-}) {
-  const payload = trimToMaxChars(redactSensitiveText(contextText), 12000);
-  const systemPrompt = buildContextCondenseSystemPrompt();
-  const userPrompt = buildContextCondenseUserPrompt({
-    pageUrl,
-    contextText: payload,
-  });
-
-  const { endpoint, headers, body } = buildFetchOptions({
-    provider,
-    apiKey,
-    model,
-    systemPrompt,
-    userPrompt,
-    baseUrl,
-    maxTokens: 700,
-  });
-
-  const providerLabel = AI_PROVIDERS[provider]?.label || provider;
-
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  const raw = await response.text();
-  if (!response.ok) {
-    let reason = `${response.status} ${response.statusText}`;
-    try {
-      const parsed = JSON.parse(raw);
-      reason = parsed.error?.message || parsed.message || reason;
-    } catch {
-      if (raw) reason = raw.slice(0, 300);
-    }
-    throw new Error(`${providerLabel} request failed: ${reason}`);
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`${providerLabel} returned non-JSON response.`, { cause: error });
-  }
-
-  const { summary, usage, model: respModel } = parseAiResponse(provider, parsed);
-  if (!summary || typeof summary !== 'string') {
-    throw new Error(`${providerLabel} response missing summary.`);
-  }
-
-  return {
-    summary,
-    usage: usage || null,
-    model: respModel || model,
-  };
-}
-
 async function condensePageContextWithAi() {
   const placeholder = 'AI context will appear here after generation.';
   let contextPayload = lastGeneratedContext.trim();
@@ -1032,7 +1124,7 @@ async function condensePageContextWithAi() {
   }
 
   const config = await getProviderLocalConfig(currentProvider);
-  if (AI_PROVIDERS[currentProvider]?.authType !== 'none' && !config.apiKey) {
+  if (AI_PROVIDERS[currentProvider]?.authType !== 'none' && !config.hasApiKey) {
     setApiKeyState(false);
     setContextStatus('Save API key in Settings tab first.', 'error');
     return;
@@ -1042,14 +1134,21 @@ async function condensePageContextWithAi() {
   setContextStatus('Condensing context with AI...');
 
   try {
-    const result = await condenseContextViaDirectProvider({
+    const resultResponse = await sendBackgroundMessage({
+      type: 'AI_CONDENSE_CONTEXT',
       provider: currentProvider,
-      apiKey: config.apiKey,
       model: getSelectedModel(config.model),
-      baseUrl: config.baseUrl,
       contextText: contextPayload,
       pageUrl: lastGeneratedContextPageUrl || lastReport?.pageUrl || '',
     });
+    if (!resultResponse?.ok) {
+      throw new Error(resultResponse?.error || 'Context condense failed.');
+    }
+    const result = {
+      summary: resultResponse.summary,
+      usage: resultResponse.usage,
+      model: resultResponse.model || getSelectedModel(config.model),
+    };
     contextAiTextEl.textContent = result.summary;
     lastCondensedContext = result.summary;
     const tokenInfo =
@@ -1912,115 +2011,8 @@ function getSummaryInstruction(style) {
   return 'Keep output concise with balanced causes and fixes.';
 }
 
-function buildSystemPrompt() {
-  return [
-    'You are an expert debugging assistant for web apps.',
-    'Transform browser console logs into a concise engineering brief for an AI developer.',
-    'Prioritize real errors over noisy warnings.',
-    'Separate deprecations/noise from actionable failures.',
-    'Be concrete and concise.',
-  ].join(' ');
-}
-
-function buildUserPrompt({ logsText, context, styleInstruction }) {
-  return [
-    'Create a concise response with this exact structure:',
-    '',
-    '## TL;DR',
-    '- One sentence summary.',
-    '',
-    '## Primary Failures',
-    '- Up to 4 bullets (critical first).',
-    '',
-    '## Likely Root Causes',
-    '- Up to 4 bullets with confidence (high/med/low).',
-    '',
-    '## Fix Plan',
-    '1. Short numbered steps.',
-    '',
-    '## Verify',
-    '- Up to 4 checks.',
-    '',
-    '## AI_DEV_INPUT_JSON',
-    '```json',
-    '{',
-    '  "suspect_area": "...",',
-    '  "top_errors": ["..."],',
-    '  "likely_causes": ["..."],',
-    '  "next_actions": ["..."]',
-    '}',
-    '```',
-    '',
-    'Keep output below ~350 words.',
-    styleInstruction || '',
-    '',
-    'Context:',
-    JSON.stringify(context, null, 2),
-    '',
-    'Logs:',
-    logsText,
-  ].join('\n');
-}
-
-async function summarizeViaDirectProvider({ provider, apiKey, model, baseUrl, report, settings }) {
-  const logsText = trimToMaxChars(redactSensitiveText(report.text), 14000);
-  const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildUserPrompt({
-    logsText,
-    styleInstruction: getSummaryInstruction(settings.summaryStyle),
-    context: {
-      pageUrl: report.pageUrl || '',
-      levelPreset: settings.levelPreset,
-      format: settings.format,
-      selectedCount: Number(report.count) || 0,
-      uniqueCount: Number(report.uniqueCount) || 0,
-    },
-  });
-
-  const { endpoint, headers, body } = buildFetchOptions({
-    provider, apiKey, model, systemPrompt, userPrompt, baseUrl,
-  });
-
-  const providerLabel = AI_PROVIDERS[provider]?.label || provider;
-  const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
-  const raw = await response.text();
-  if (!response.ok) {
-    let reason = `${response.status} ${response.statusText}`;
-    try {
-      const parsed = JSON.parse(raw);
-      reason = parsed.error?.message || parsed.message || reason;
-    } catch (error) {
-      if (raw) reason = raw.slice(0, 300);
-      throw new Error(`${providerLabel} request failed: ${reason}`, { cause: error });
-    }
-    throw new Error(`${providerLabel} request failed: ${reason}`);
-  }
-
-  let parsed;
-  try { parsed = JSON.parse(raw); } catch (error) {
-    throw new Error(`${providerLabel} returned non-JSON response.`, { cause: error });
-  }
-
-  const { summary, usage, model: respModel } = parseAiResponse(provider, parsed);
-  if (!summary || typeof summary !== 'string') {
-    throw new Error(`${providerLabel} response missing summary.`);
-  }
-
-  return { summary, usage: usage || null, model: respModel || model };
-}
-
 async function sendBackgroundMessage(message) {
   return withTimeout(chrome.runtime.sendMessage(message), 20000);
-}
-
-function isBackgroundUnavailableError(error) {
-  if (!error || typeof error.message !== 'string') return false;
-  const msg = error.message.toLowerCase();
-  return (
-    msg.includes('receiving end does not exist') ||
-    msg.includes('could not establish connection') ||
-    msg.includes('port closed')
-  );
 }
 
 async function saveApiKey() {
@@ -2071,63 +2063,39 @@ async function generateAiBrief() {
   }
 
   const config = await getProviderLocalConfig(currentProvider);
-  if (AI_PROVIDERS[currentProvider]?.authType !== 'none' && !config.apiKey) {
+  if (AI_PROVIDERS[currentProvider]?.authType !== 'none' && !config.hasApiKey) {
     setApiKeyState(false);
     setAiStatus(`Save ${AI_PROVIDERS[currentProvider]?.label || 'API'} key first.`, 'error');
     return;
   }
-  setApiKeyState(Boolean(config.apiKey));
+  setApiKeyState(Boolean(config.hasApiKey));
 
   const selectedModel = getSelectedModel(config.model);
   summarizeButton.disabled = true;
   setAiStatus('Generating AI brief...');
 
   try {
-    let result = null;
-    try {
-      const backgroundResp = await sendBackgroundMessage({
-        type: 'AI_SUMMARIZE',
-        provider: currentProvider,
-        model: selectedModel,
-        logsText: lastReport.text,
-        pageUrl: lastReport.pageUrl,
-        levelPreset: settings.levelPreset,
-        format: settings.format,
-        selectedCount: lastReport.count,
-        uniqueCount: lastReport.uniqueCount,
-        summaryStyle: settings.summaryStyle,
-        styleInstruction: getSummaryInstruction(settings.summaryStyle),
-      });
-
-      if (backgroundResp && backgroundResp.ok) {
-        result = { summary: backgroundResp.summary, usage: backgroundResp.usage, model: backgroundResp.model || selectedModel };
-      } else if (backgroundResp && backgroundResp.error) {
-        throw new Error(backgroundResp.error);
-      }
-    } catch (bgError) {
-      if (!isBackgroundUnavailableError(bgError)) {
-        // Use fallback
-      }
-      result = await summarizeViaDirectProvider({
-        provider: currentProvider,
-        apiKey: config.apiKey,
-        model: selectedModel,
-        baseUrl: config.baseUrl,
-        report: lastReport,
-        settings,
-      });
+    const backgroundResp = await sendBackgroundMessage({
+      type: 'AI_SUMMARIZE',
+      provider: currentProvider,
+      model: selectedModel,
+      logsText: lastReport.text,
+      pageUrl: lastReport.pageUrl,
+      levelPreset: settings.levelPreset,
+      format: settings.format,
+      selectedCount: lastReport.count,
+      uniqueCount: lastReport.uniqueCount,
+      summaryStyle: settings.summaryStyle,
+      styleInstruction: getSummaryInstruction(settings.summaryStyle),
+    });
+    if (!backgroundResp?.ok) {
+      throw new Error(backgroundResp?.error || 'AI summarize failed.');
     }
-
-    if (!result) {
-      result = await summarizeViaDirectProvider({
-        provider: currentProvider,
-        apiKey: config.apiKey,
-        model: selectedModel,
-        baseUrl: config.baseUrl,
-        report: lastReport,
-        settings,
-      });
-    }
+    const result = {
+      summary: backgroundResp.summary,
+      usage: backgroundResp.usage,
+      model: backgroundResp.model || selectedModel,
+    };
 
     summaryTextEl.textContent = result.summary;
     lastGeneratedSummary = result.summary;
@@ -2174,6 +2142,403 @@ async function syncSelectedModelToStorage() {
   try {
     await saveProviderLocalConfig({ provider: currentProvider, model: getSelectedModel() });
   } catch { /* Ignore model sync errors. */ }
+}
+
+// === Image Panel Logic ===
+
+function normalizeImageFormat(format) {
+  if (typeof format !== 'string') return '';
+  const cleaned = format.trim().toLowerCase();
+  if (!cleaned) return '';
+  if (cleaned === 'jpeg') return 'jpg';
+  if (cleaned.includes('/')) {
+    return normalizeImageFormat(cleaned.split('/').pop() || '');
+  }
+  return cleaned;
+}
+
+function canonicalImageUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    parsed.search = '';
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+function imageCandidateScore(image) {
+  const width = Number(image?.width) || 0;
+  const height = Number(image?.height) || 0;
+  const sizeBytes = Number(image?.sizeBytes) || 0;
+  return width * height + Math.min(sizeBytes / 1024, 5000);
+}
+
+function formatImageDimensions(image) {
+  const width = Number(image?.width) || 0;
+  const height = Number(image?.height) || 0;
+  if (width > 0 && height > 0) {
+    return `${width}x${height}`;
+  }
+  if (width > 0) {
+    return `${width}x?`;
+  }
+  if (height > 0) {
+    return `?x${height}`;
+  }
+  return 'unknown size';
+}
+
+function getImageSizeLabel(image) {
+  const parsed = Number(image?.sizeBytes);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return formatVideoSize(parsed);
+  }
+  if (typeof image?.sizeText === 'string' && image.sizeText.trim()) {
+    return image.sizeText.trim();
+  }
+  return 'size unknown';
+}
+
+function applyImageFilters(images, pageUrl) {
+  const settings = readSettingsFromUi();
+  const pageHost = (() => {
+    try {
+      return new URL(pageUrl).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+  })();
+  const formatFilter = normalizeImageFormat(settings.imageFormat);
+  const sizePreset = settings.imageSizePreset || 'medium_plus';
+  const bytesPreset = settings.imageBytesPreset || 'any';
+  const sameDomainOnly = Boolean(settings.imageSameDomainOnly);
+  const dedupeCanonical = Boolean(settings.imageDedupeCanonical);
+
+  const filtered = [];
+  const canonicalSeen = new Set();
+  const sorted = (Array.isArray(images) ? images.slice() : []).sort(
+    (a, b) => imageCandidateScore(b) - imageCandidateScore(a)
+  );
+
+  for (const image of sorted) {
+    if (!image?.url) continue;
+    const format = normalizeImageFormat(
+      image.format || image.ext || extractExtFromUrl(image.url)
+    );
+    if (formatFilter !== 'all') {
+      if (formatFilter === 'jpg') {
+        if (!(format === 'jpg' || format === 'jpeg')) {
+          continue;
+        }
+      } else if (format !== formatFilter) {
+        continue;
+      }
+    }
+
+    const width = Number(image.width) || 0;
+    const height = Number(image.height) || 0;
+    const longestSide = Math.max(width, height);
+    if (sizePreset === 'large_plus') {
+      if (longestSide <= 0 || longestSide < 1200) {
+        continue;
+      }
+    } else if (sizePreset === 'medium_plus') {
+      if (longestSide <= 0 || longestSide < 600) {
+        continue;
+      }
+    } else if (sizePreset === 'small_only') {
+      if (longestSide <= 0 || longestSide >= 600) {
+        continue;
+      }
+    }
+
+    const sizeBytes = Number(image.sizeBytes) || 0;
+    if (bytesPreset === 'gt_1mb') {
+      if (sizeBytes <= 1024 * 1024) {
+        continue;
+      }
+    } else if (bytesPreset === 'lt_300kb') {
+      if (sizeBytes <= 0 || sizeBytes >= 300 * 1024) {
+        continue;
+      }
+    }
+
+    if (sameDomainOnly && pageHost) {
+      try {
+        const imageHost = new URL(image.url).hostname.toLowerCase();
+        if (imageHost !== pageHost) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (dedupeCanonical) {
+      const canonical = image.canonicalUrl || canonicalImageUrl(image.url);
+      if (canonicalSeen.has(canonical)) {
+        continue;
+      }
+      canonicalSeen.add(canonical);
+    }
+
+    filtered.push(image);
+  }
+
+  return filtered;
+}
+
+function updateImageStats() {
+  const selectedCount = filteredImageCandidates.filter((image) =>
+    selectedImageUrls.has(image.url)
+  ).length;
+  imagesStatsEl.textContent = `${filteredImageCandidates.length} shown (${allImageCandidates.length} total), ${selectedCount} selected.`;
+}
+
+function applyMetadataToImageItem(item, metadata) {
+  if (!item || !metadata) {
+    return;
+  }
+  const sizeBadge = item.querySelector('.imageBadge.size');
+  if (sizeBadge) {
+    sizeBadge.textContent = metadata.sizeText || formatVideoSize(metadata.sizeBytes) || 'size unknown';
+  }
+  const formatBadge = item.querySelector('.imageBadge.format');
+  if (formatBadge) {
+    const normalized = normalizeImageFormat(
+      metadata.ext || extractExtFromUrl(item.dataset.imageUrl || '')
+    );
+    formatBadge.textContent = normalized ? normalized.toUpperCase() : 'IMG';
+  }
+}
+
+async function hydrateImageMetadata(tabId, image, item) {
+  if (!Number.isInteger(tabId) || tabId < 0 || !image?.url || !item) {
+    return;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'GET_IMAGE_METADATA',
+      tabId,
+      url: image.url,
+    });
+    if (response?.ok && response.metadata) {
+      applyMetadataToImageItem(item, response.metadata);
+    }
+  } catch {
+    // Metadata hydration is best-effort.
+  }
+}
+
+function renderImageList(images, tabId) {
+  imageListEl.innerHTML = '';
+  filteredImageCandidates = images;
+
+  if (!images.length) {
+    imageListEl.innerHTML =
+      '<p class="hint">No images match current filters. Try disabling large-only or dedupe.</p>';
+    updateImageStats();
+    return;
+  }
+
+  for (let index = 0; index < images.length; index += 1) {
+    const image = images[index];
+    const item = document.createElement('div');
+    item.className = 'imageItem';
+    item.dataset.imageUrl = image.url;
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'imageSelect';
+    checkbox.checked = selectedImageUrls.has(image.url);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        selectedImageUrls.add(image.url);
+      } else {
+        selectedImageUrls.delete(image.url);
+      }
+      updateImageStats();
+    });
+    item.appendChild(checkbox);
+
+    const thumb = document.createElement('img');
+    thumb.className = 'imageThumb';
+    thumb.loading = 'lazy';
+    thumb.alt = image.altText || 'Image thumbnail';
+    thumb.src = image.url;
+    item.appendChild(thumb);
+
+    const info = document.createElement('div');
+    info.className = 'imageInfo';
+
+    const urlLine = document.createElement('div');
+    urlLine.className = 'imageUrl';
+    urlLine.textContent = image.fileName || image.url;
+    urlLine.title = image.url;
+    info.appendChild(urlLine);
+
+    const meta = document.createElement('div');
+    meta.className = 'imageMeta';
+
+    const formatBadge = document.createElement('span');
+    formatBadge.className = 'imageBadge format';
+    const format = normalizeImageFormat(
+      image.format || image.ext || extractExtFromUrl(image.url)
+    );
+    formatBadge.textContent = format ? format.toUpperCase() : 'IMG';
+    meta.appendChild(formatBadge);
+
+    const sizeBadge = document.createElement('span');
+    sizeBadge.className = 'imageBadge size';
+    sizeBadge.textContent = getImageSizeLabel(image);
+    meta.appendChild(sizeBadge);
+
+    const dimensionsBadge = document.createElement('span');
+    dimensionsBadge.className = 'imageBadge';
+    dimensionsBadge.textContent = formatImageDimensions(image);
+    meta.appendChild(dimensionsBadge);
+
+    if (image.source) {
+      const sourceBadge = document.createElement('span');
+      sourceBadge.className = 'imageBadge source';
+      sourceBadge.textContent = image.source;
+      meta.appendChild(sourceBadge);
+    }
+
+    info.appendChild(meta);
+    item.appendChild(info);
+    imageListEl.appendChild(item);
+    if (index < 80) {
+      void hydrateImageMetadata(tabId, image, item);
+    }
+  }
+
+  updateImageStats();
+}
+
+function refreshImageDisplayFromCache(tabId = -1) {
+  const filtered = applyImageFilters(allImageCandidates, lastImageTabUrl);
+  renderImageList(filtered, tabId);
+}
+
+async function triggerImageScan(tabId) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await withTimeout(chrome.tabs.sendMessage(tabId, { type: 'SCAN_PAGE_IMAGES' }), 4500);
+      return;
+    } catch (error) {
+      if (!isNoReceiverError(error)) {
+        throw error;
+      }
+      await ensureContentScriptLoaded(tabId);
+    }
+  }
+}
+
+function buildImageDownloadFilename(image, index) {
+  const host = (() => {
+    try {
+      return new URL(image.url).hostname.replace(/[^a-z0-9.-]+/gi, '-');
+    } catch {
+      return 'image';
+    }
+  })();
+  const width = Number(image.width) || 0;
+  const height = Number(image.height) || 0;
+  const dims = width > 0 && height > 0 ? `${width}x${height}` : 'unknown';
+  const ext =
+    normalizeImageFormat(image.ext || image.format || extractExtFromUrl(image.url)) || 'jpg';
+  const safeIndex = String(index + 1).padStart(3, '0');
+  return `${host}-${dims}-${safeIndex}.${ext}`;
+}
+
+async function downloadImageCandidate(image, index) {
+  const response = await chrome.runtime.sendMessage({
+    type: 'DOWNLOAD_IMAGE',
+    url: image.url,
+    filename: buildImageDownloadFilename(image, index),
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Image download rejected.');
+  }
+}
+
+async function downloadSelectedImages() {
+  const selected = filteredImageCandidates.filter((image) =>
+    selectedImageUrls.has(image.url)
+  );
+  if (!selected.length) {
+    setImagesStatus('No images selected.', 'error');
+    return;
+  }
+  imageDownloadSelectedButton.disabled = true;
+  setImagesStatus(`Starting ${selected.length} image download(s)...`);
+  try {
+    for (let index = 0; index < selected.length; index += 1) {
+      await downloadImageCandidate(selected[index], index);
+    }
+    setImagesStatus(`Started ${selected.length} image download(s).`, 'success');
+  } catch (error) {
+    setImagesStatus(`Image download failed: ${error.message}`, 'error');
+  } finally {
+    imageDownloadSelectedButton.disabled = false;
+  }
+}
+
+async function refreshImageList(options = {}) {
+  const shouldScan = options.scan !== false;
+  try {
+    const activeTab = await getActiveTabOrThrow();
+    lastImageTabUrl = activeTab.url || '';
+    if (shouldScan) {
+      try {
+        await triggerImageScan(activeTab.id);
+        await wait(260);
+      } catch {
+        // Keep going with cached detections.
+      }
+    }
+    const response = await chrome.runtime.sendMessage({
+      type: 'GET_TAB_IMAGES',
+      tabId: activeTab.id,
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Could not load images.');
+    }
+    allImageCandidates = Array.isArray(response.images) ? response.images : [];
+    selectedImageUrls = new Set(
+      Array.from(selectedImageUrls).filter((url) =>
+        allImageCandidates.some((image) => image.url === url)
+      )
+    );
+    refreshImageDisplayFromCache(activeTab.id);
+    setImagesStatus(
+      `Loaded ${filteredImageCandidates.length} image(s) from ${allImageCandidates.length} candidates.`,
+      'success'
+    );
+  } catch (error) {
+    allImageCandidates = [];
+    filteredImageCandidates = [];
+    selectedImageUrls = new Set();
+    imageListEl.innerHTML =
+      '<p class="hint">No images loaded. Open a regular webpage and click "Scan Page".</p>';
+    updateImageStats();
+    setImagesStatus(`Image scan failed: ${error.message}`, 'error');
+  }
+}
+
+function selectAllFilteredImages() {
+  filteredImageCandidates.forEach((image) => {
+    selectedImageUrls.add(image.url);
+  });
+  renderImageList(filteredImageCandidates, -1);
+}
+
+function clearSelectedImages() {
+  selectedImageUrls.clear();
+  renderImageList(filteredImageCandidates, -1);
 }
 
 // === Video Panel Logic ===
@@ -2290,7 +2655,12 @@ function canDownloadMp3(video) {
   return Boolean(video.mp3Available) && hasAudioCandidate(video);
 }
 
+function canUseLocalDownloaderFallback() {
+  return Boolean(useLocalDownloaderToggle?.checked);
+}
+
 function buildMp3Filename(video) {
+  const ext = video.audioExt || 'mp3';
   const base = sanitizeFileStem(
     video.fileName || (() => {
       try {
@@ -2300,7 +2670,8 @@ function buildMp3Filename(video) {
       }
     })()
   );
-  return base.toLowerCase().endsWith('.mp3') ? base : `${base}.mp3`;
+  if (base.toLowerCase().endsWith(`.${ext}`)) return base;
+  return `${base}.${ext}`;
 }
 
 function applyMetadataToVideoItem(item, metadata) {
@@ -2308,6 +2679,7 @@ function applyMetadataToVideoItem(item, metadata) {
     return;
   }
   const thumb = item.querySelector('.videoThumb');
+  const thumbWrap = item.querySelector('.videoThumbWrap');
   if (
     thumb &&
     metadata.thumbnailUrl &&
@@ -2316,6 +2688,7 @@ function applyMetadataToVideoItem(item, metadata) {
   ) {
     thumb.src = metadata.thumbnailUrl;
     thumb.classList.remove('is-hidden');
+    if (thumbWrap) thumbWrap.classList.remove('is-placeholder');
   }
 
   const sizeBadge = item.querySelector('.videoBadge.size');
@@ -2328,7 +2701,7 @@ function applyMetadataToVideoItem(item, metadata) {
   }
 
   const audioBtn = item.querySelector('.videoAudioBtn');
-  if (audioBtn && metadata.mp3Available) {
+  if (audioBtn && (metadata.mp3Available || canUseLocalDownloaderFallback())) {
     audioBtn.disabled = false;
     audioBtn.title = '';
     audioBtn.classList.remove('muted');
@@ -2380,9 +2753,13 @@ function renderVideoList(videos, tabId) {
   }
 
   downloadAllButton.style.display = '';
+  const localFallbackEnabled = canUseLocalDownloaderFallback();
   for (const video of videos) {
     const item = document.createElement('div');
     item.className = 'videoItem';
+
+    const thumbWrap = document.createElement('div');
+    thumbWrap.className = 'videoThumbWrap';
 
     const thumb = document.createElement('img');
     thumb.className = 'videoThumb';
@@ -2390,10 +2767,16 @@ function renderVideoList(videos, tabId) {
     thumb.loading = 'lazy';
     if (video.thumbnailUrl) {
       thumb.src = video.thumbnailUrl;
+      thumb.addEventListener('error', () => {
+        thumb.classList.add('is-hidden');
+        thumbWrap.classList.add('is-placeholder');
+      }, { once: true });
     } else {
       thumb.classList.add('is-hidden');
+      thumbWrap.classList.add('is-placeholder');
     }
-    item.appendChild(thumb);
+    thumbWrap.appendChild(thumb);
+    item.appendChild(thumbWrap);
 
     const info = document.createElement('div');
     info.className = 'videoInfo';
@@ -2441,22 +2824,35 @@ function renderVideoList(videos, tabId) {
     dlBtn.className = 'videoDownloadBtn';
     const unavailableReason = getVideoAvailabilityLabel(video);
     if (unavailableReason) {
-      dlBtn.textContent = 'Unavailable';
-      dlBtn.disabled = true;
-      dlBtn.title = unavailableReason;
+      if (localFallbackEnabled) {
+        dlBtn.textContent = 'yt-dlp';
+        dlBtn.title = `${unavailableReason}. Use local helper fallback.`;
+        dlBtn.addEventListener('click', () => downloadVideo(video));
+      } else {
+        dlBtn.textContent = 'Unavailable';
+        dlBtn.disabled = true;
+        dlBtn.title = unavailableReason;
+      }
     } else {
       dlBtn.textContent = 'Download';
       dlBtn.addEventListener('click', () => downloadVideo(video));
     }
     actions.appendChild(dlBtn);
 
-    if (hasAudioCandidate(video)) {
+    if (hasAudioCandidate(video) || localFallbackEnabled) {
       const audioBtn = document.createElement('button');
       audioBtn.className = 'videoAudioBtn';
-      audioBtn.textContent = 'MP3';
+      const audioLabel = hasAudioCandidate(video)
+        ? (video.audioExt || 'audio').toUpperCase()
+        : 'MP3';
+      audioBtn.textContent = audioLabel;
       if (!canDownloadMp3(video)) {
-        audioBtn.classList.add('muted');
-        audioBtn.title = 'MP3 extraction is not possible for this stream.';
+        if (localFallbackEnabled) {
+          audioBtn.title = 'Use local helper to extract MP3 from page URL.';
+        } else {
+          audioBtn.classList.add('muted');
+          audioBtn.title = 'Audio extraction is not possible for this stream.';
+        }
       }
       audioBtn.addEventListener('click', () => downloadMp3(video));
       actions.appendChild(audioBtn);
@@ -2472,12 +2868,67 @@ function renderVideoList(videos, tabId) {
   setVideoStatus(`${videos.length} video(s) detected.`, 'success');
 }
 
+async function resolveSourcePageUrl(video) {
+  const fromVideo = typeof video?.pageUrl === 'string' ? video.pageUrl.trim() : '';
+  if (fromVideo) {
+    return fromVideo;
+  }
+  try {
+    const activeTab = await getActiveTabOrThrow();
+    if (typeof activeTab.url === 'string' && activeTab.url.trim()) {
+      return activeTab.url;
+    }
+  } catch {
+    // Ignore and fallback to stream URL.
+  }
+  return typeof video?.url === 'string' ? video.url : '';
+}
+
+async function downloadVideoWithLocalHelper(video) {
+  const localConfig = getLocalDownloaderConfig();
+  const sourcePageUrl = await resolveSourcePageUrl(video);
+  const response = await chrome.runtime.sendMessage({
+    type: 'EXTERNAL_DOWNLOAD_VIDEO',
+    localHelperUrl: localConfig.baseUrl,
+    sourcePageUrl,
+    url: video.url,
+    title: video.fileName || '',
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Local helper video download failed.');
+  }
+  return response;
+}
+
+async function extractAudioWithLocalHelper(video, audioFormat = 'mp3') {
+  const localConfig = getLocalDownloaderConfig();
+  const sourcePageUrl = await resolveSourcePageUrl(video);
+  const response = await chrome.runtime.sendMessage({
+    type: 'EXTERNAL_EXTRACT_AUDIO',
+    localHelperUrl: localConfig.baseUrl,
+    sourcePageUrl,
+    url: video.audioUrl || video.url,
+    title: video.fileName || '',
+    audioFormat,
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Local helper audio extraction failed.');
+  }
+  return response;
+}
+
 async function downloadVideo(video) {
+  const localFallbackEnabled = canUseLocalDownloaderFallback();
   try {
     if (video.requiresMux || video.hasAudio === false) {
-      throw new Error(
-        'Selected stream is not directly downloadable with audio in-browser.'
-      );
+      if (!localFallbackEnabled) {
+        throw new Error(
+          'Selected stream is not directly downloadable with audio in-browser.'
+        );
+      }
+      await downloadVideoWithLocalHelper(video);
+      setVideoStatus('yt-dlp video download started.', 'success');
+      return;
     }
     const response = await chrome.runtime.sendMessage({
       type: 'DOWNLOAD_VIDEO',
@@ -2490,47 +2941,74 @@ async function downloadVideo(video) {
       throw new Error(response?.error || 'Download was rejected by the browser.');
     }
   } catch (error) {
+    if (localFallbackEnabled) {
+      try {
+        await downloadVideoWithLocalHelper(video);
+        setVideoStatus('yt-dlp fallback started.', 'success');
+        return;
+      } catch {
+        // Fall through to show original error.
+      }
+    }
     setVideoStatus(`Download failed: ${error.message}`, 'error');
   }
 }
 
 async function downloadMp3(video) {
+  const localFallbackEnabled = canUseLocalDownloaderFallback();
+  const directAudioLabel = (video.audioExt || 'audio').toUpperCase();
   try {
-    if (!hasAudioCandidate(video)) {
-      throw new Error('No extractable audio track found for this video.');
+    if (hasAudioCandidate(video) && canDownloadMp3(video)) {
+      const response = await chrome.runtime.sendMessage({
+        type: 'DOWNLOAD_AUDIO',
+        url: video.audioUrl,
+        filename: buildMp3Filename(video),
+        requireDirectAudio: true,
+      });
+      if (response?.ok) {
+        setVideoStatus(`${directAudioLabel} download started.`, 'success');
+        return;
+      }
+      throw new Error(response?.error || 'Direct audio download was rejected.');
     }
-    if (!canDownloadMp3(video)) {
-      throw new Error('MP3 extraction is not possible for this stream.');
+
+    if (!localFallbackEnabled) {
+      if (!hasAudioCandidate(video)) {
+        throw new Error('No extractable audio track found for this video.');
+      }
+      throw new Error('Direct audio extraction is not possible for this stream.');
     }
-    const response = await chrome.runtime.sendMessage({
-      type: 'DOWNLOAD_AUDIO',
-      url: video.audioUrl,
-      filename: buildMp3Filename(video),
-      requireMp3: true,
-    });
-    if (response?.ok) {
-      setVideoStatus('MP3 download started.', 'success');
-    } else {
-      throw new Error(response?.error || 'MP3 download was rejected.');
-    }
+
+    await extractAudioWithLocalHelper(video, 'mp3');
+    setVideoStatus('MP3 extraction started via yt-dlp helper.', 'success');
   } catch (error) {
-    setVideoStatus(`MP3 unavailable: ${error.message}`, 'error');
+    if (localFallbackEnabled) {
+      try {
+        await extractAudioWithLocalHelper(video, 'mp3');
+        setVideoStatus('MP3 fallback started via yt-dlp helper.', 'success');
+        return;
+      } catch {
+        // Fall through to show primary failure.
+      }
+    }
+    setVideoStatus(`Audio unavailable: ${error.message}`, 'error');
   }
 }
 
 async function downloadAllVideos() {
   try {
     const activeTab = await getActiveTabOrThrow();
+    const localFallbackEnabled = canUseLocalDownloaderFallback();
     const response = await chrome.runtime.sendMessage({
       type: 'GET_TAB_VIDEOS',
       tabId: activeTab.id,
     });
     if (response?.ok && response.videos?.length) {
       const downloadableVideos = response.videos.filter(
-        (video) => !getVideoAvailabilityLabel(video)
+        (video) => localFallbackEnabled || !getVideoAvailabilityLabel(video)
       );
       if (!downloadableVideos.length) {
-        setVideoStatus('No directly downloadable video streams found.', 'error');
+        setVideoStatus('No downloadable video streams found.', 'error');
         return;
       }
       for (const video of downloadableVideos) {
@@ -2573,6 +3051,9 @@ function bindEvents() {
       if (cfg) {
         setActiveView(cfg.views[0]);
         saveSettings();
+        if (cfg.views[0] === 'images') {
+          void refreshImageList({ scan: false });
+        }
       }
     });
   });
@@ -2616,6 +3097,23 @@ function bindEvents() {
   saveKeyButton.addEventListener('click', saveApiKey);
   clearKeyButton.addEventListener('click', clearApiKey);
   saveOllamaUrlButton.addEventListener('click', saveOllamaUrl);
+  if (saveLocalDownloaderUrlButton) {
+    saveLocalDownloaderUrlButton.addEventListener('click', saveLocalDownloaderConfig);
+  }
+  if (testLocalDownloaderButton) {
+    testLocalDownloaderButton.addEventListener('click', () => {
+      void testLocalDownloader();
+    });
+  }
+  if (useLocalDownloaderToggle) {
+    useLocalDownloaderToggle.addEventListener('change', () => {
+      saveSettings();
+      void refreshVideoList();
+    });
+  }
+  if (localDownloaderUrlInput) {
+    localDownloaderUrlInput.addEventListener('change', saveLocalDownloaderConfig);
+  }
   providerSelect.addEventListener('change', () => { switchProvider(providerSelect.value); });
 
   // SEO panel
@@ -2639,22 +3137,70 @@ function bindEvents() {
     sitemapPatternInputEl.addEventListener('input', () => { if (sitemapAllUrls.length > 0) refreshSitemapDisplay(); });
   }
 
+  // Image panel
+  scanImagesButton.addEventListener('click', () => {
+    refreshImageList({ scan: true });
+  });
+  imageSelectAllButton.addEventListener('click', selectAllFilteredImages);
+  imageSelectNoneButton.addEventListener('click', clearSelectedImages);
+  imageDownloadSelectedButton.addEventListener('click', downloadSelectedImages);
+  [imageSizePresetSelect, imageBytesPresetSelect, imageFormatSelect, imageSameDomainToggle, imageDedupeToggle].forEach((control) => {
+    control.addEventListener('change', () => {
+      saveSettings();
+      refreshImageDisplayFromCache();
+    });
+  });
+
   // Video panel
   downloadAllButton.addEventListener('click', downloadAllVideos);
+
+  // Auto-refresh when switching tabs or navigating
+  chrome.tabs.onActivated.addListener(() => {
+    void refreshVideoList();
+    void refreshImageList({ scan: false });
+  });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'complete') {
+      // Small delay to let webRequest/watcher detect videos first
+      setTimeout(() => {
+        void chrome.tabs
+          .query({ active: true, currentWindow: true })
+          .then((tabs) => {
+            const activeTabId = tabs[0]?.id;
+            if (!Number.isInteger(activeTabId) || activeTabId !== tabId) {
+              return;
+            }
+            void refreshVideoList();
+            void refreshImageList({ scan: false });
+          })
+          .catch(() => {
+            // Ignore tab query failure.
+          });
+      }, 600);
+    }
+  });
+  // Also refresh when side panel regains visibility
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      void refreshVideoList();
+    }
+  });
 }
 
 // === Initialize ===
 
 async function initialize() {
-  loadSettings();
+  await loadSettings();
   saveSettings();
   bindEvents();
   setAiStatus('AI brief status: idle');
   setContextStatus('Context status: idle');
   setSettingsStatus('Settings status: idle');
   setVideoStatus('Video status: scanning...');
+  setImagesStatus('Image status: scanning...');
+  setLocalDownloaderStatus('Local helper status: idle');
   contextAiTextEl.textContent = 'AI condensed context will appear here after generation.';
-  await Promise.all([refreshPreview(), loadAiConfig(), refreshVideoList()]);
+  await Promise.all([refreshPreview(), loadAiConfig(), refreshVideoList(), refreshImageList()]);
 }
 
 document.addEventListener('DOMContentLoaded', () => {

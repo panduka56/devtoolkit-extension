@@ -1,4 +1,9 @@
 (() => {
+  if (window.__devToolkitContentScriptInstalled) {
+    return;
+  }
+  window.__devToolkitContentScriptInstalled = true;
+
   const EVENT_NAME = '__CONSOLE_CAPTURE_EVENT__';
   const LOG_LIMIT = 5000;
   const CONTEXT_MAX_TEXT_CHARS = 12000;
@@ -1158,16 +1163,241 @@ ${rows}
     return toAbsoluteHttpUrl(videoPoster);
   }
 
+  function parseSrcsetUrls(srcsetValue) {
+    if (typeof srcsetValue !== 'string' || !srcsetValue.trim()) {
+      return [];
+    }
+    return srcsetValue
+      .split(',')
+      .map((entry) => entry.trim().split(/\s+/)[0])
+      .filter(Boolean);
+  }
+
+  function parseCssImageUrls(value) {
+    if (typeof value !== 'string' || !value.includes('url(')) {
+      return [];
+    }
+    const matches = [];
+    const re = /url\((['"]?)(.*?)\1\)/gi;
+    let match = re.exec(value);
+    while (match) {
+      const raw = (match[2] || '').trim();
+      if (raw && !raw.startsWith('data:')) {
+        matches.push(raw);
+      }
+      match = re.exec(value);
+    }
+    return matches;
+  }
+
+  function normalizeImageFormat(url, contentType = '') {
+    const type = typeof contentType === 'string' ? contentType.toLowerCase() : '';
+    if (type.includes('image/jpeg') || type.includes('image/jpg')) return 'jpg';
+    if (type.includes('image/png')) return 'png';
+    if (type.includes('image/webp')) return 'webp';
+    if (type.includes('image/gif')) return 'gif';
+    if (type.includes('image/svg')) return 'svg';
+    if (type.includes('image/avif')) return 'avif';
+    if (type.includes('image/bmp')) return 'bmp';
+    if (type.includes('image/tiff')) return 'tiff';
+    try {
+      const pathname = new URL(url).pathname.toLowerCase();
+      const ext = pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1] || '';
+      if (ext === 'jpeg') return 'jpg';
+      return ext;
+    } catch {
+      return '';
+    }
+  }
+
+  function collectDomImageCandidates() {
+    const candidates = [];
+    const seen = new Set();
+    const pageTitle = document.title || 'image';
+    const lazyAttrs = [
+      'data-src',
+      'data-original',
+      'data-lazy-src',
+      'data-lazyload',
+      'data-image',
+      'data-srcset',
+      'data-bg',
+      'data-background',
+    ];
+
+    function pushImage(url, options = {}) {
+      const normalizedUrl = toAbsoluteHttpUrl(url);
+      if (!normalizedUrl) {
+        return;
+      }
+      const key = normalizedUrl;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      const width = Number(options.width) || 0;
+      const height = Number(options.height) || 0;
+      const contentType =
+        typeof options.contentType === 'string' ? options.contentType.trim() : '';
+      candidates.push({
+        id: generateId(),
+        url: normalizedUrl,
+        fileName: options.fileName || pageTitle,
+        source: options.source || 'dom',
+        width: width > 0 ? Math.floor(width) : null,
+        height: height > 0 ? Math.floor(height) : null,
+        altText:
+          typeof options.altText === 'string' ? normalizeWhitespace(options.altText) : '',
+        titleText:
+          typeof options.titleText === 'string'
+            ? normalizeWhitespace(options.titleText)
+            : '',
+        contentType,
+        format: normalizeImageFormat(normalizedUrl, contentType),
+        pageUrl: window.location.href,
+      });
+    }
+
+    const imageNodes = Array.from(document.images || []).slice(0, 400);
+    for (const image of imageNodes) {
+      const width = Number(image.naturalWidth) || Number(image.width) || 0;
+      const height = Number(image.naturalHeight) || Number(image.height) || 0;
+      const altText = image.getAttribute('alt') || '';
+      const titleText = image.getAttribute('title') || '';
+      if (image.currentSrc) {
+        pushImage(image.currentSrc, {
+          source: 'img-currentSrc',
+          width,
+          height,
+          altText,
+          titleText,
+        });
+      }
+      if (image.src) {
+        pushImage(image.src, {
+          source: 'img-src',
+          width,
+          height,
+          altText,
+          titleText,
+        });
+      }
+      const srcsetValue = image.getAttribute('srcset') || '';
+      const srcsetUrls = parseSrcsetUrls(srcsetValue);
+      for (const srcsetUrl of srcsetUrls) {
+        pushImage(srcsetUrl, {
+          source: 'img-srcset',
+          width,
+          height,
+          altText,
+          titleText,
+        });
+      }
+    }
+
+    const pictureSources = Array.from(
+      document.querySelectorAll('picture source[srcset]')
+    ).slice(0, 300);
+    for (const sourceEl of pictureSources) {
+      const srcsetUrls = parseSrcsetUrls(sourceEl.getAttribute('srcset') || '');
+      for (const srcsetUrl of srcsetUrls) {
+        pushImage(srcsetUrl, {
+          source: 'picture-srcset',
+          titleText: sourceEl.getAttribute('title') || '',
+        });
+      }
+    }
+
+    const lazyNodes = Array.from(document.querySelectorAll('img, source, [data-src], [data-bg], [data-background]')).slice(0, 500);
+    for (const node of lazyNodes) {
+      const width = Number(node.naturalWidth || node.width || node.clientWidth) || 0;
+      const height = Number(node.naturalHeight || node.height || node.clientHeight) || 0;
+      for (const attr of lazyAttrs) {
+        const raw = node.getAttribute(attr) || '';
+        if (!raw) {
+          continue;
+        }
+        if (attr.includes('srcset')) {
+          const srcsetUrls = parseSrcsetUrls(raw);
+          for (const srcsetUrl of srcsetUrls) {
+            pushImage(srcsetUrl, {
+              source: `lazy-${attr}`,
+              width,
+              height,
+              altText: node.getAttribute?.('alt') || '',
+              titleText: node.getAttribute?.('title') || '',
+            });
+          }
+        } else {
+          pushImage(raw, {
+            source: `lazy-${attr}`,
+            width,
+            height,
+            altText: node.getAttribute?.('alt') || '',
+            titleText: node.getAttribute?.('title') || '',
+          });
+        }
+      }
+    }
+
+    const styleNodes = Array.from(
+      document.querySelectorAll('[style*="background"], [style*="background-image"]')
+    ).slice(0, 500);
+    for (const node of styleNodes) {
+      const inlineStyle = node.getAttribute('style') || '';
+      const cssUrls = parseCssImageUrls(inlineStyle);
+      const rect = node.getBoundingClientRect();
+      for (const cssUrl of cssUrls) {
+        pushImage(cssUrl, {
+          source: 'style-background',
+          width: rect.width,
+          height: rect.height,
+          titleText: node.getAttribute('title') || '',
+        });
+      }
+    }
+
+    const metaImageSelectors = [
+      'meta[property="og:image"]',
+      'meta[property="og:image:url"]',
+      'meta[name="twitter:image"]',
+      'meta[name="twitter:image:src"]',
+    ];
+    for (const selector of metaImageSelectors) {
+      const value = document.querySelector(selector)?.getAttribute('content') || '';
+      if (!value) {
+        continue;
+      }
+      pushImage(value, {
+        source: `meta-${selector}`,
+      });
+    }
+
+    return candidates;
+  }
+
+  function scanDomForImagesAndRelay() {
+    const images = collectDomImageCandidates();
+    if (images.length) {
+      chrome.runtime.sendMessage({ message: 'add-image-links', imageLinks: images });
+    }
+    return images;
+  }
+
   function collectDomVideoCandidates() {
     const candidates = [];
     const seen = new Set();
     const fallbackThumb = getPageThumbnailUrl();
     const pageTitle = document.title || 'video';
-    const mediaPattern = /\.(m3u8|mpd|mp4|webm|m4v|mov)(\?|$)/i;
+    const mediaPattern = /\.(m3u8|mpd|mp4|webm|m4v|mov|ts)(\?|$)/i;
 
     function addCandidate(url, options = {}) {
       const resolvedUrl = toAbsoluteHttpUrl(url);
-      if (!resolvedUrl || !mediaPattern.test(resolvedUrl)) {
+      if (!resolvedUrl) {
+        return;
+      }
+      // Accept URLs with video extensions OR any URL from a <video> element (options.fromVideoEl)
+      if (!options.fromVideoEl && !mediaPattern.test(resolvedUrl)) {
         return;
       }
       const quality = options.quality || 'N/A';
@@ -1185,6 +1415,7 @@ ${rows}
         playlist,
         thumbnailUrl: options.thumbnailUrl || fallbackThumb || '',
         source: options.source || 'dom',
+        pageUrl: window.location.href,
         hasAudio:
           options.hasAudio === true || options.hasAudio === false
             ? options.hasAudio
@@ -1208,6 +1439,7 @@ ${rows}
           thumbnailUrl: poster,
           hasAudio: hasAudioTrack,
           isPrimary: idx === 0,
+          fromVideoEl: true,
         });
       }
       if (videoEl.src) {
@@ -1216,6 +1448,7 @@ ${rows}
           thumbnailUrl: poster,
           hasAudio: hasAudioTrack,
           isPrimary: idx === 0,
+          fromVideoEl: true,
         });
       }
       const sourceNodes = Array.from(videoEl.querySelectorAll('source[src]')).slice(0, 12);
@@ -1225,6 +1458,7 @@ ${rows}
           thumbnailUrl: poster,
           hasAudio: hasAudioTrack,
           isPrimary: idx === 0,
+          fromVideoEl: true,
         });
       }
     }
@@ -1264,6 +1498,7 @@ ${rows}
             sizeBytes: Number(v.sizeBytes || v.contentLength || v.filesize) || null,
             contentType: typeof v.contentType === 'string' ? v.contentType : '',
             source: typeof v.source === 'string' ? v.source : '',
+            pageUrl: toAbsoluteHttpUrl(v.pageUrl || '') || window.location.href,
             hasAudio:
               v.hasAudio === true || v.hasAudio === false ? v.hasAudio : null,
             requiresMux: Boolean(v.requiresMux),
@@ -1289,6 +1524,7 @@ ${rows}
           sizeBytes: Number(item.sizeBytes || item.contentLength || item.filesize) || null,
           contentType: typeof item.contentType === 'string' ? item.contentType : '',
           source: typeof item.source === 'string' ? item.source : '',
+          pageUrl: toAbsoluteHttpUrl(item.pageUrl || '') || window.location.href,
           hasAudio:
             item.hasAudio === true || item.hasAudio === false ? item.hasAudio : null,
           requiresMux: Boolean(item.requiresMux),
@@ -1342,6 +1578,18 @@ ${rows}
     if (message.type === 'SCAN_PAGE_VIDEOS') {
       const count = scanDomForVideosAndRelay();
       sendResponse({ ok: true, count });
+      return;
+    }
+
+    if (message.type === 'GET_PAGE_IMAGES') {
+      const images = collectDomImageCandidates();
+      sendResponse({ ok: true, images, count: images.length });
+      return;
+    }
+
+    if (message.type === 'SCAN_PAGE_IMAGES') {
+      const images = scanDomForImagesAndRelay();
+      sendResponse({ ok: true, images, count: images.length });
       return;
     }
 
