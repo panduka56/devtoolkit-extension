@@ -65,9 +65,6 @@ const apiKeySection = document.getElementById('apiKeySection');
 const ollamaUrlSection = document.getElementById('ollamaUrlSection');
 const saveOllamaUrlButton = document.getElementById('saveOllamaUrlButton');
 const useLocalDownloaderToggle = document.getElementById('useLocalDownloaderToggle');
-const localDownloaderUrlInput = document.getElementById('localDownloaderUrlInput');
-const saveLocalDownloaderUrlButton = document.getElementById('saveLocalDownloaderUrlButton');
-const testLocalDownloaderButton = document.getElementById('testLocalDownloaderButton');
 const localDownloaderStatusEl = document.getElementById('localDownloaderStatus');
 
 const activeFormatEl = document.getElementById('activeFormat');
@@ -123,7 +120,7 @@ const imageSameDomainToggle = document.getElementById('imageSameDomainToggle');
 const imageDedupeToggle = document.getElementById('imageDedupeToggle');
 
 const CONTEXT_EXTRACTION_MAX_CHARS = 42000;
-const DEFAULT_LOCAL_HELPER_URL = 'http://127.0.0.1:41771';
+const DEFAULT_LOCAL_HELPER_URL = 'http://192.168.4.15:38086';
 
 const SETTINGS_KEY = 'devtoolkit-settings-v1';
 const DEFAULT_SETTINGS = {
@@ -235,25 +232,6 @@ function parseIntInRange(value, min, max, fallback) {
     return fallback;
   }
   return Math.max(min, Math.min(max, parsed));
-}
-
-function normalizeLocalHelperUrl(value) {
-  const raw =
-    typeof value === 'string' && value.trim()
-      ? value.trim()
-      : DEFAULT_LOCAL_HELPER_URL;
-  try {
-    const parsed = new URL(raw);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return DEFAULT_LOCAL_HELPER_URL;
-    }
-    parsed.pathname = '';
-    parsed.search = '';
-    parsed.hash = '';
-    return parsed.href.replace(/\/$/, '');
-  } catch {
-    return DEFAULT_LOCAL_HELPER_URL;
-  }
 }
 
 function getFormatLabel(format) {
@@ -396,7 +374,7 @@ function readSettingsFromUi() {
     imageSameDomainOnly: Boolean(imageSameDomainToggle.checked),
     imageDedupeCanonical: Boolean(imageDedupeToggle.checked),
     useLocalDownloader: Boolean(useLocalDownloaderToggle?.checked),
-    localDownloaderUrl: normalizeLocalHelperUrl(localDownloaderUrlInput?.value),
+    localDownloaderUrl: DEFAULT_LOCAL_HELPER_URL,
   };
 }
 
@@ -415,11 +393,6 @@ function writeSettingsToUi(settings) {
   imageDedupeToggle.checked = Boolean(settings.imageDedupeCanonical);
   if (useLocalDownloaderToggle) {
     useLocalDownloaderToggle.checked = Boolean(settings.useLocalDownloader);
-  }
-  if (localDownloaderUrlInput) {
-    localDownloaderUrlInput.value = normalizeLocalHelperUrl(
-      settings.localDownloaderUrl
-    );
   }
 }
 
@@ -518,9 +491,7 @@ function normalizeSettings(parsed) {
       parsed && typeof parsed.useLocalDownloader === 'boolean'
         ? parsed.useLocalDownloader
         : DEFAULT_SETTINGS.useLocalDownloader,
-    localDownloaderUrl: normalizeLocalHelperUrl(
-      parsed?.localDownloaderUrl || DEFAULT_SETTINGS.localDownloaderUrl
-    ),
+    localDownloaderUrl: DEFAULT_LOCAL_HELPER_URL,
   };
 }
 
@@ -576,50 +547,7 @@ function settingsHash(settings) {
 function getLocalDownloaderConfig() {
   return {
     enabled: Boolean(useLocalDownloaderToggle?.checked),
-    baseUrl: normalizeLocalHelperUrl(localDownloaderUrlInput?.value),
-  };
-}
-
-function saveLocalDownloaderConfig() {
-  saveSettings();
-  const config = getLocalDownloaderConfig();
-  setLocalDownloaderStatus(`Bridge URL saved: ${config.baseUrl}`, 'success');
-}
-
-async function testLocalDownloader() {
-  const config = getLocalDownloaderConfig();
-  setLocalDownloaderStatus('Checking downloader bridge...');
-  testLocalDownloaderButton.disabled = true;
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: 'EXTERNAL_HELPER_HEALTHCHECK',
-      localHelperUrl: config.baseUrl,
-    });
-    if (!response?.ok) {
-      throw new Error(response?.error || 'Helper health check failed.');
-    }
-    const helperType =
-      typeof response.helperType === 'string' ? response.helperType : 'unknown';
-    const helperVersion =
-      typeof response.helper?.version === 'string' ? response.helper.version : '';
-    const helperLabel =
-      helperType === 'youtube-dl-server'
-        ? 'youtube-dl-server'
-        : helperType === 'devtoolkit'
-          ? 'DevToolkit helper'
-          : helperType;
-    const versionSuffix = helperVersion ? `, v${helperVersion}` : '';
-    setLocalDownloaderStatus(
-      `Bridge reachable (${helperLabel} at ${response.baseUrl}${versionSuffix}).`,
-      'success'
-    );
-  } catch (error) {
-    setLocalDownloaderStatus(
-      `Downloader bridge unavailable: ${error?.message || 'unknown error'}`,
-      'error'
-    );
-  } finally {
-    testLocalDownloaderButton.disabled = false;
+    baseUrl: DEFAULT_LOCAL_HELPER_URL,
   }
 }
 
@@ -3106,22 +3034,11 @@ function bindEvents() {
   saveKeyButton.addEventListener('click', saveApiKey);
   clearKeyButton.addEventListener('click', clearApiKey);
   saveOllamaUrlButton.addEventListener('click', saveOllamaUrl);
-  if (saveLocalDownloaderUrlButton) {
-    saveLocalDownloaderUrlButton.addEventListener('click', saveLocalDownloaderConfig);
-  }
-  if (testLocalDownloaderButton) {
-    testLocalDownloaderButton.addEventListener('click', () => {
-      void testLocalDownloader();
-    });
-  }
   if (useLocalDownloaderToggle) {
     useLocalDownloaderToggle.addEventListener('change', () => {
       saveSettings();
       void refreshVideoList();
     });
-  }
-  if (localDownloaderUrlInput) {
-    localDownloaderUrlInput.addEventListener('change', saveLocalDownloaderConfig);
   }
   providerSelect.addEventListener('change', () => { switchProvider(providerSelect.value); });
 
@@ -3207,7 +3124,7 @@ async function initialize() {
   setSettingsStatus('Settings status: idle');
   setVideoStatus('Video status: scanning...');
   setImagesStatus('Image status: scanning...');
-  setLocalDownloaderStatus('Downloader bridge status: idle');
+  setLocalDownloaderStatus(`Downloader bridge: ${DEFAULT_LOCAL_HELPER_URL}`);
   contextAiTextEl.textContent = 'AI condensed context will appear here after generation.';
   await Promise.all([refreshPreview(), loadAiConfig(), refreshVideoList(), refreshImageList()]);
 }

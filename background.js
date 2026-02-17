@@ -26,7 +26,7 @@ let tabVideoMutationQueue = Promise.resolve();
 let tabImageDataCache = null;
 let tabImageMutationQueue = Promise.resolve();
 const helperTypeCache = new Map();
-const DEFAULT_LOCAL_HELPER_URL = 'http://127.0.0.1:41771';
+const DEFAULT_LOCAL_HELPER_URL = 'http://192.168.4.15:38086';
 const LOCAL_HELPER_TIMEOUT_MS = 10 * 60 * 1000;
 
 function getVideoStorageArea() {
