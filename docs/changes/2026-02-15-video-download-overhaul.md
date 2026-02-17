@@ -61,7 +61,6 @@ VideoDownloader/
 - Added DOM-based fallback video scan:
   - `<video>` `currentSrc`/`src`
   - `<source src>`
-  - media links from anchors
 - Added new message handler: `SCAN_PAGE_VIDEOS`.
 - Added startup scan (`setTimeout`) to seed detections quickly.
 - Improved relay payload for `videos-found` events to include:
@@ -82,7 +81,7 @@ VideoDownloader/
   - extracts non-audio direct streams (when exposed)
   - extracts `hlsManifestUrl` / `dashManifestUrl`
   - propagates quality/content-type/thumbnail/size where available
-- Added generic URL parser for `.m3u8`, `.mpd`, `.mp4`, `.webm` links in JSON/text payloads.
+- Added generic URL parser for `.m3u8`, `.mpd`, `.mp4`, `.webm` links in JSON/text payloads (later disabled during follow-up tuning to reduce junk detections).
 
 ### 6) Popup UI: thumbnails, size, scan trigger, and filename fixes
 
@@ -121,3 +120,22 @@ All passed.
 
 - DRM/encrypted protected streams (for example many protected YouTube/OnlyFans playback paths) are still constrained by browser/platform protections and may not be directly downloadable through extension-only logic.
 - Playlist URLs (`.m3u8`, `.mpd`) are now detected and labeled correctly, but full mux/merge workflows still require an external processing path.
+
+## Follow-up Updates
+
+### Commit `8a97fa6` (post-overhaul tuning)
+
+- Added candidate curation/ranking in background:
+  - junk suppression
+  - canonical dedupe
+  - primary stream selection
+- Reduced noisy detections by removing anchor-based DOM fallback and disabling generic URL parser in runtime parser registry.
+- Added `Main` badge and explicit unavailable state for non-direct streams.
+
+### Commit `693591e` (TikTok + MP3 workflow)
+
+- Added dedicated TikTok parser with prioritized main stream detection.
+- Extended payload/storage model with audio metadata (`audioUrl`, `audioExt`, `mp3Available`).
+- Added `DOWNLOAD_AUDIO` API and popup `MP3` action:
+  - starts MP3 download when directly available
+  - reports unavailability clearly when MP3 extraction is not possible.

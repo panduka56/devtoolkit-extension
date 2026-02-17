@@ -19,7 +19,7 @@
 **Step 1: Remove old files (preserve docs)**
 
 ```bash
-cd /Users/panduka/Sites/VideoDownloader
+cd $PROJECT_ROOT
 # Move docs out temporarily
 cp -r docs /tmp/devtoolkit-docs-backup
 # Remove everything
@@ -32,7 +32,7 @@ cp -r /tmp/devtoolkit-docs-backup docs
 **Step 2: Initialize git repo**
 
 ```bash
-cd /Users/panduka/Sites/VideoDownloader
+cd $PROJECT_ROOT
 git init
 echo "node_modules/" > .gitignore
 ```
@@ -117,7 +117,7 @@ git commit -m "feat: initialize DevToolkit extension skeleton"
 
 **Files:**
 - Create: `lib/ai-providers.js`
-- Source: `/Users/panduka/Sites/Chome-Extention/src/lib/ai-providers.js`
+- Source: `$CONSOLE_SIGNAL_ROOT/src/lib/ai-providers.js`
 
 **Step 1: Copy ai-providers.js from Console Signal**
 
@@ -128,7 +128,7 @@ Copy the file verbatim from Console Signal. This module is clean, well-structure
 - `parseAiResponse()` — parses response from each provider
 
 ```bash
-cp /Users/panduka/Sites/Chome-Extention/src/lib/ai-providers.js /Users/panduka/Sites/VideoDownloader/lib/ai-providers.js
+cp $CONSOLE_SIGNAL_ROOT/src/lib/ai-providers.js $PROJECT_ROOT/lib/ai-providers.js
 ```
 
 **Step 2: Commit**
@@ -144,13 +144,13 @@ git commit -m "feat: port AI providers module from Console Signal"
 
 **Files:**
 - Create: `lib/video-parsers.js`
-- Reference: original `/Users/panduka/Sites/VideoDownloader/watcher.js` (backed up before Task 1)
+- Reference: original `$PROJECT_ROOT/watcher.js` (backed up before Task 1)
 
 **Step 1: Back up original watcher.js before cleanup**
 
 Before Task 1 deletes it, ensure we have a backup:
 ```bash
-cp /tmp/devtoolkit-docs-backup/../watcher.js.bak /Users/panduka/Sites/VideoDownloader/lib/video-parsers-reference.js 2>/dev/null || true
+cp /tmp/devtoolkit-docs-backup/../watcher.js.bak $PROJECT_ROOT/lib/video-parsers-reference.js 2>/dev/null || true
 ```
 
 If the backup isn't available, the deobfuscated logic from the design exploration is sufficient.
@@ -752,12 +752,12 @@ git commit -m "feat: XHR/fetch interception watcher (deobfuscated + fetch suppor
 
 **Files:**
 - Create: `page-logger.js`
-- Source: `/Users/panduka/Sites/Chome-Extention/src/page-logger.js`
+- Source: `$CONSOLE_SIGNAL_ROOT/src/page-logger.js`
 
 **Step 1: Copy page-logger.js verbatim**
 
 ```bash
-cp /Users/panduka/Sites/Chome-Extention/src/page-logger.js /Users/panduka/Sites/VideoDownloader/page-logger.js
+cp $CONSOLE_SIGNAL_ROOT/src/page-logger.js $PROJECT_ROOT/page-logger.js
 ```
 
 This file is clean and needs no changes. It wraps console methods and dispatches `__CONSOLE_CAPTURE_EVENT__` custom events.
@@ -1053,12 +1053,12 @@ git commit -m "feat: popup.html with all categories including video"
 
 **Files:**
 - Create: `popup.css`
-- Source: `/Users/panduka/Sites/Chome-Extention/src/popup.css`
+- Source: `$CONSOLE_SIGNAL_ROOT/src/popup.css`
 
 **Step 1: Copy Console Signal's popup.css and extend**
 
 ```bash
-cp /Users/panduka/Sites/Chome-Extention/src/popup.css /Users/panduka/Sites/VideoDownloader/popup.css
+cp $CONSOLE_SIGNAL_ROOT/src/popup.css $PROJECT_ROOT/popup.css
 ```
 
 **Step 2: Add video-specific styles**
@@ -1351,9 +1351,9 @@ git commit -m "feat: popup.js with video panel + all Console Signal features"
 Use a simple green-on-dark icon. For now, copy Console Signal's icons and rename:
 
 ```bash
-cp /Users/panduka/Sites/Chome-Extention/src/icons/console-copy-32.png /Users/panduka/Sites/VideoDownloader/icons/icon-32.png
-cp /Users/panduka/Sites/Chome-Extention/src/icons/console-copy-48.png /Users/panduka/Sites/VideoDownloader/icons/icon-64.png
-cp /Users/panduka/Sites/Chome-Extention/src/icons/console-copy-128.png /Users/panduka/Sites/VideoDownloader/icons/icon-128.png
+cp $CONSOLE_SIGNAL_ROOT/src/icons/console-copy-32.png $PROJECT_ROOT/icons/icon-32.png
+cp $CONSOLE_SIGNAL_ROOT/src/icons/console-copy-48.png $PROJECT_ROOT/icons/icon-64.png
+cp $CONSOLE_SIGNAL_ROOT/src/icons/console-copy-128.png $PROJECT_ROOT/icons/icon-128.png
 ```
 
 **Step 2: Commit**
@@ -1372,7 +1372,7 @@ git commit -m "feat: placeholder extension icons"
 1. Open `chrome://extensions/`
 2. Enable Developer Mode
 3. Click "Load unpacked"
-4. Select `/Users/panduka/Sites/VideoDownloader`
+4. Select `$PROJECT_ROOT`
 5. Check for manifest errors in the extensions page
 
 **Step 2: Test video detection**
