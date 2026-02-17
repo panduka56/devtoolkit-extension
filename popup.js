@@ -66,6 +66,8 @@ const ollamaUrlSection = document.getElementById('ollamaUrlSection');
 const saveOllamaUrlButton = document.getElementById('saveOllamaUrlButton');
 const useLocalDownloaderToggle = document.getElementById('useLocalDownloaderToggle');
 const localDownloaderStatusEl = document.getElementById('localDownloaderStatus');
+const videoModeHintEl = document.getElementById('videoModeHint');
+const openYtdlpFolderButton = document.getElementById('openYtdlpFolderButton');
 
 const activeFormatEl = document.getElementById('activeFormat');
 const apiKeyStateEl = document.getElementById('apiKeyState');
@@ -121,6 +123,8 @@ const imageDedupeToggle = document.getElementById('imageDedupeToggle');
 
 const CONTEXT_EXTRACTION_MAX_CHARS = 42000;
 const DEFAULT_LOCAL_HELPER_URL = 'http://192.168.4.15:38086';
+const LOCAL_HELPER_WEB_UI_URL = `${DEFAULT_LOCAL_HELPER_URL}/youtube-dl`;
+const LOCAL_HELPER_SMB_URL = 'smb://192.168.4.15/X-Downloads/Youtube%20DL/';
 
 const SETTINGS_KEY = 'devtoolkit-settings-v1';
 const DEFAULT_SETTINGS = {
@@ -394,6 +398,7 @@ function writeSettingsToUi(settings) {
   if (useLocalDownloaderToggle) {
     useLocalDownloaderToggle.checked = Boolean(settings.useLocalDownloader);
   }
+  updateVideoModeHint();
 }
 
 function normalizeSettings(parsed) {
@@ -548,7 +553,71 @@ function getLocalDownloaderConfig() {
   return {
     enabled: Boolean(useLocalDownloaderToggle?.checked),
     baseUrl: DEFAULT_LOCAL_HELPER_URL,
+  };
+}
+
+function updateVideoModeHint() {
+  if (!videoModeHintEl) {
+    return;
   }
+  if (canUseLocalDownloaderFallback()) {
+    videoModeHintEl.textContent =
+      'Mode: yt-dlp server (best for YouTube, TikTok, Instagram, and protected streams).';
+    return;
+  }
+  videoModeHintEl.textContent =
+    'Mode: direct browser download only (best for regular MP4/WebM links).';
+}
+
+async function openYtdlpFolder() {
+  try {
+    await chrome.tabs.create({ url: LOCAL_HELPER_SMB_URL });
+    setLocalDownloaderStatus('Opened SMB download folder.', 'success');
+    return;
+  } catch {
+    // Browser may block smb:// in tab creation.
+  }
+
+  try {
+    await chrome.tabs.create({ url: LOCAL_HELPER_WEB_UI_URL });
+    setLocalDownloaderStatus(
+      `Could not open SMB directly. Opened yt-dlp web UI (${LOCAL_HELPER_WEB_UI_URL}).`,
+      'success'
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : 'Failed to open yt-dlp links.';
+    setLocalDownloaderStatus(
+      `Open this manually: ${LOCAL_HELPER_SMB_URL} (${message})`,
+      'error'
+    );
+  }
+}
+
+async function getPageThumbnailForTab(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    return '';
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await withTimeout(
+        chrome.tabs.sendMessage(tabId, { type: 'GET_PAGE_THUMBNAIL' }),
+        3000
+      );
+      if (response?.ok && typeof response.thumbnailUrl === 'string') {
+        return response.thumbnailUrl;
+      }
+      return '';
+    } catch (error) {
+      if (!isNoReceiverError(error)) {
+        return '';
+      }
+      await ensureContentScriptLoaded(tabId);
+    }
+  }
+  return '';
 }
 
 function renderStats(report) {
@@ -2596,6 +2665,75 @@ function canUseLocalDownloaderFallback() {
   return Boolean(useLocalDownloaderToggle?.checked);
 }
 
+function normalizeThumbnailUrl(value, baseUrl = '') {
+  if (typeof value !== 'string' || !value.trim()) {
+    return '';
+  }
+  try {
+    const candidate = value.trim();
+    const parsed = candidate.startsWith('//')
+      ? new URL(`https:${candidate}`)
+      : new URL(candidate, baseUrl || undefined);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : '';
+  } catch {
+    return '';
+  }
+}
+
+function extractYouTubeVideoId(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    return '';
+  }
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'youtu.be') {
+      return parsed.pathname.split('/').filter(Boolean)[0] || '';
+    }
+    if (host.includes('youtube.com')) {
+      const vParam = parsed.searchParams.get('v');
+      if (vParam) {
+        return vParam;
+      }
+      const shortsMatch = parsed.pathname.match(/\/shorts\/([A-Za-z0-9_-]{6,})/);
+      if (shortsMatch) {
+        return shortsMatch[1];
+      }
+      const embedMatch = parsed.pathname.match(/\/embed\/([A-Za-z0-9_-]{6,})/);
+      if (embedMatch) {
+        return embedMatch[1];
+      }
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function deriveYouTubeThumbnailUrl(video) {
+  const candidates = [video?.pageUrl, video?.url];
+  for (const candidate of candidates) {
+    const videoId = extractYouTubeVideoId(candidate);
+    if (videoId) {
+      return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    }
+  }
+  return '';
+}
+
+function resolveVideoThumbnailUrl(video, pageFallbackThumbnail) {
+  const pageUrlBase = typeof video?.pageUrl === 'string' ? video.pageUrl : '';
+  const primary = normalizeThumbnailUrl(video?.thumbnailUrl || '', pageUrlBase);
+  if (primary) {
+    return primary;
+  }
+  const youtubeThumb = normalizeThumbnailUrl(deriveYouTubeThumbnailUrl(video));
+  if (youtubeThumb) {
+    return youtubeThumb;
+  }
+  return normalizeThumbnailUrl(pageFallbackThumbnail || '', pageUrlBase);
+}
+
 function buildMp3Filename(video) {
   const ext = video.audioExt || 'mp3';
   const base = sanitizeFileStem(
@@ -2617,13 +2755,13 @@ function applyMetadataToVideoItem(item, metadata) {
   }
   const thumb = item.querySelector('.videoThumb');
   const thumbWrap = item.querySelector('.videoThumbWrap');
+  const metadataThumb = resolveVideoThumbnailUrl(metadata, '');
   if (
     thumb &&
-    metadata.thumbnailUrl &&
-    typeof metadata.thumbnailUrl === 'string' &&
-    !thumb.src
+    metadataThumb &&
+    (!thumb.src || thumb.classList.contains('is-hidden'))
   ) {
-    thumb.src = metadata.thumbnailUrl;
+    thumb.src = metadataThumb;
     thumb.classList.remove('is-hidden');
     if (thumbWrap) thumbWrap.classList.remove('is-placeholder');
   }
@@ -2680,7 +2818,7 @@ async function triggerVideoScan(tabId) {
   }
 }
 
-function renderVideoList(videos, tabId) {
+function renderVideoList(videos, tabId, pageFallbackThumbnail = '') {
   videoListEl.innerHTML = '';
   if (!videos || videos.length === 0) {
     videoListEl.innerHTML = '<p class="hint">No videos detected on this page.</p>';
@@ -2702,12 +2840,24 @@ function renderVideoList(videos, tabId) {
     thumb.className = 'videoThumb';
     thumb.alt = 'Video thumbnail';
     thumb.loading = 'lazy';
-    if (video.thumbnailUrl) {
-      thumb.src = video.thumbnailUrl;
-      thumb.addEventListener('error', () => {
-        thumb.classList.add('is-hidden');
-        thumbWrap.classList.add('is-placeholder');
-      }, { once: true });
+    const primaryThumbnail = resolveVideoThumbnailUrl(video, pageFallbackThumbnail);
+    const pageFallback = normalizeThumbnailUrl(pageFallbackThumbnail);
+    if (primaryThumbnail) {
+      thumb.src = primaryThumbnail;
+      let fallbackAttempted = false;
+      thumb.addEventListener(
+        'error',
+        () => {
+          if (!fallbackAttempted && pageFallback && thumb.src !== pageFallback) {
+            fallbackAttempted = true;
+            thumb.src = pageFallback;
+            return;
+          }
+          thumb.classList.add('is-hidden');
+          thumbWrap.classList.add('is-placeholder');
+        },
+        { passive: true }
+      );
     } else {
       thumb.classList.add('is-hidden');
       thumbWrap.classList.add('is-placeholder');
@@ -2760,18 +2910,17 @@ function renderVideoList(videos, tabId) {
     const dlBtn = document.createElement('button');
     dlBtn.className = 'videoDownloadBtn';
     const unavailableReason = getVideoAvailabilityLabel(video);
-    if (unavailableReason) {
-      if (localFallbackEnabled) {
-        dlBtn.textContent = 'yt-dlp';
-        dlBtn.title = `${unavailableReason}. Use downloader bridge fallback.`;
-        dlBtn.addEventListener('click', () => downloadVideo(video));
-      } else {
-        dlBtn.textContent = 'Unavailable';
-        dlBtn.disabled = true;
-        dlBtn.title = unavailableReason;
-      }
+    if (localFallbackEnabled) {
+      dlBtn.textContent = 'Queue';
+      dlBtn.title = 'Queue on yt-dlp server';
+      dlBtn.addEventListener('click', () => downloadVideo(video));
+    } else if (unavailableReason) {
+      dlBtn.textContent = 'Unavailable';
+      dlBtn.disabled = true;
+      dlBtn.title = `${unavailableReason}. Switch mode to yt-dlp server to download this.`;
     } else {
       dlBtn.textContent = 'Download';
+      dlBtn.title = 'Direct browser download';
       dlBtn.addEventListener('click', () => downloadVideo(video));
     }
     actions.appendChild(dlBtn);
@@ -2779,17 +2928,17 @@ function renderVideoList(videos, tabId) {
     if (hasAudioCandidate(video) || localFallbackEnabled) {
       const audioBtn = document.createElement('button');
       audioBtn.className = 'videoAudioBtn';
-      const audioLabel = hasAudioCandidate(video)
-        ? (video.audioExt || 'audio').toUpperCase()
-        : 'MP3';
+      const audioLabel = localFallbackEnabled
+        ? 'MP3'
+        : hasAudioCandidate(video)
+          ? (video.audioExt || 'audio').toUpperCase()
+          : 'MP3';
       audioBtn.textContent = audioLabel;
-      if (!canDownloadMp3(video)) {
-        if (localFallbackEnabled) {
-          audioBtn.title = 'Use downloader bridge to extract MP3 from page URL.';
-        } else {
-          audioBtn.classList.add('muted');
-          audioBtn.title = 'Audio extraction is not possible for this stream.';
-        }
+      if (localFallbackEnabled) {
+        audioBtn.title = 'Extract MP3 via yt-dlp server';
+      } else if (!canDownloadMp3(video)) {
+        audioBtn.classList.add('muted');
+        audioBtn.title = 'Audio extraction is not possible for this stream.';
       }
       audioBtn.addEventListener('click', () => downloadMp3(video));
       actions.appendChild(audioBtn);
@@ -2855,18 +3004,21 @@ async function extractAudioWithLocalHelper(video, audioFormat = 'mp3') {
 }
 
 async function downloadVideo(video) {
-  const localFallbackEnabled = canUseLocalDownloaderFallback();
+  const localModeEnabled = canUseLocalDownloaderFallback();
   try {
-    if (video.requiresMux || video.hasAudio === false) {
-      if (!localFallbackEnabled) {
-        throw new Error(
-          'Selected stream is not directly downloadable with audio in-browser.'
-        );
-      }
+    if (localModeEnabled) {
       await downloadVideoWithLocalHelper(video);
-      setVideoStatus('yt-dlp video download started.', 'success');
+      setVideoStatus('Queued on yt-dlp server.', 'success');
       return;
     }
+
+    const unavailableReason = getVideoAvailabilityLabel(video);
+    if (unavailableReason) {
+      throw new Error(
+        `${unavailableReason}. Enable "Use yt-dlp server" for this source.`
+      );
+    }
+
     const response = await chrome.runtime.sendMessage({
       type: 'DOWNLOAD_VIDEO',
       url: video.url,
@@ -2878,23 +3030,24 @@ async function downloadVideo(video) {
       throw new Error(response?.error || 'Download was rejected by the browser.');
     }
   } catch (error) {
-    if (localFallbackEnabled) {
-      try {
-        await downloadVideoWithLocalHelper(video);
-        setVideoStatus('Downloader bridge fallback started.', 'success');
-        return;
-      } catch {
-        // Fall through to show original error.
-      }
-    }
-    setVideoStatus(`Download failed: ${error.message}`, 'error');
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : 'Unknown download failure.';
+    setVideoStatus(`Download failed: ${message}`, 'error');
   }
 }
 
 async function downloadMp3(video) {
-  const localFallbackEnabled = canUseLocalDownloaderFallback();
+  const localModeEnabled = canUseLocalDownloaderFallback();
   const directAudioLabel = (video.audioExt || 'audio').toUpperCase();
   try {
+    if (localModeEnabled) {
+      await extractAudioWithLocalHelper(video, 'mp3');
+      setVideoStatus('MP3 queued on yt-dlp server.', 'success');
+      return;
+    }
+
     if (hasAudioCandidate(video) && canDownloadMp3(video)) {
       const response = await chrome.runtime.sendMessage({
         type: 'DOWNLOAD_AUDIO',
@@ -2909,26 +3062,18 @@ async function downloadMp3(video) {
       throw new Error(response?.error || 'Direct audio download was rejected.');
     }
 
-    if (!localFallbackEnabled) {
-      if (!hasAudioCandidate(video)) {
-        throw new Error('No extractable audio track found for this video.');
-      }
-      throw new Error('Direct audio extraction is not possible for this stream.');
+    if (!hasAudioCandidate(video)) {
+      throw new Error('No extractable audio track found for this stream.');
     }
-
-    await extractAudioWithLocalHelper(video, 'mp3');
-    setVideoStatus('MP3 extraction started via yt-dlp helper.', 'success');
+    throw new Error(
+      'Direct audio extraction is not possible for this stream. Enable "Use yt-dlp server".'
+    );
   } catch (error) {
-    if (localFallbackEnabled) {
-      try {
-        await extractAudioWithLocalHelper(video, 'mp3');
-        setVideoStatus('MP3 fallback started via yt-dlp helper.', 'success');
-        return;
-      } catch {
-        // Fall through to show primary failure.
-      }
-    }
-    setVideoStatus(`Audio unavailable: ${error.message}`, 'error');
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : 'Unknown audio download failure.';
+    setVideoStatus(`Audio unavailable: ${message}`, 'error');
   }
 }
 
@@ -2960,21 +3105,27 @@ async function downloadAllVideos() {
 async function refreshVideoList() {
   try {
     const activeTab = await getActiveTabOrThrow();
+    let pageFallbackThumbnail = '';
     try {
       await triggerVideoScan(activeTab.id);
       await wait(220);
     } catch {
       // Keep going with cached detections from background storage.
     }
+    pageFallbackThumbnail = await getPageThumbnailForTab(activeTab.id);
     const response = await chrome.runtime.sendMessage({
       type: 'GET_TAB_VIDEOS',
       tabId: activeTab.id,
     });
     if (response?.ok) {
-      renderVideoList(response.videos, activeTab.id);
+      renderVideoList(response.videos, activeTab.id, pageFallbackThumbnail);
     }
   } catch (error) {
-    setVideoStatus(error.message, 'error');
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : 'Failed to load videos.';
+    setVideoStatus(message, 'error');
   }
 }
 
@@ -3037,7 +3188,17 @@ function bindEvents() {
   if (useLocalDownloaderToggle) {
     useLocalDownloaderToggle.addEventListener('change', () => {
       saveSettings();
+      updateVideoModeHint();
+      const modeMessage = canUseLocalDownloaderFallback()
+        ? `Mode switched: yt-dlp server (${DEFAULT_LOCAL_HELPER_URL}).`
+        : 'Mode switched: direct browser download only.';
+      setLocalDownloaderStatus(modeMessage, 'success');
       void refreshVideoList();
+    });
+  }
+  if (openYtdlpFolderButton) {
+    openYtdlpFolderButton.addEventListener('click', () => {
+      void openYtdlpFolder();
     });
   }
   providerSelect.addEventListener('change', () => { switchProvider(providerSelect.value); });
@@ -3124,7 +3285,10 @@ async function initialize() {
   setSettingsStatus('Settings status: idle');
   setVideoStatus('Video status: scanning...');
   setImagesStatus('Image status: scanning...');
-  setLocalDownloaderStatus(`Downloader bridge: ${DEFAULT_LOCAL_HELPER_URL}`);
+  updateVideoModeHint();
+  setLocalDownloaderStatus(
+    `Bridge: ${DEFAULT_LOCAL_HELPER_URL} • Folder: ${LOCAL_HELPER_SMB_URL}`
+  );
   contextAiTextEl.textContent = 'AI condensed context will appear here after generation.';
   await Promise.all([refreshPreview(), loadAiConfig(), refreshVideoList(), refreshImageList()]);
 }

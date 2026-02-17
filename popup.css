@@ -827,6 +827,22 @@ button:disabled {
 }
 
 /* === Video Tab === */
+.videoBridgeBar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: end;
+}
+
+.videoBridgeToggle {
+  margin: 0;
+}
+
+.videoBridgeToggle > span:first-child {
+  margin-bottom: 3px;
+}
+
 .videoList {
   display: flex;
   flex-direction: column;
@@ -1076,6 +1092,7 @@ button:disabled {
 @media (max-width: 520px) {
   .grid,
   .aiActions,
+  .videoBridgeBar,
   .imageActions,
   .contextActions,
   .localDownloaderActions,

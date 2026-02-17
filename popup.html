@@ -80,6 +80,19 @@
             <button id="downloadAllButton" class="actionBtn" type="button" style="display: none;">Download All</button>
           </div>
           <p class="hint">Direct streams are downloadable. Manifest-only or protected streams are shown as unavailable.</p>
+          <div class="videoBridgeBar">
+            <label class="toggleLabel videoBridgeToggle" for="useLocalDownloaderToggle">
+              <span>Download mode</span>
+              <span class="toggleWrap">
+                <input id="useLocalDownloaderToggle" type="checkbox" checked />
+                <i class="toggleTrack"></i>
+                <strong>Use yt-dlp server</strong>
+              </span>
+            </label>
+            <button id="openYtdlpFolderButton" class="actionBtn" type="button">Open Download Folder</button>
+          </div>
+          <p id="videoModeHint" class="hint">Mode: yt-dlp server for YouTube/TikTok/Instagram.</p>
+          <p id="localDownloaderStatus" class="statusLine">Bridge: http://192.168.4.15:38086</p>
           <div id="videoList" class="videoList">
             <p class="hint">No videos detected on this page. Navigate to a page with video content.</p>
           </div>
@@ -466,24 +479,6 @@ AI condensed context will appear here after generation.</pre
               </select>
             </label>
           </div>
-          <hr class="settingsDivider" />
-          <div class="cardHead">
-            <h2>Downloader Bridge</h2>
-          </div>
-          <p class="hint">
-            Uses Unraid bridge `http://192.168.4.15:38086` for one-click extraction when direct browser downloads are unavailable.
-          </p>
-          <div class="grid">
-            <label class="toggleLabel" for="useLocalDownloaderToggle">
-              <span>Fallback mode</span>
-              <span class="toggleWrap">
-                <input id="useLocalDownloaderToggle" type="checkbox" checked />
-                <i class="toggleTrack"></i>
-                <strong>Enable bridge fallback</strong>
-              </span>
-            </label>
-          </div>
-          <p id="localDownloaderStatus" class="statusLine">Downloader bridge: http://192.168.4.15:38086</p>
           <p id="settingsStatus" class="statusLine">Settings status: idle</p>
         </section>
       </section>

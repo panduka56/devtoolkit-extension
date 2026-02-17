@@ -1581,6 +1581,15 @@ ${rows}
       return;
     }
 
+    if (message.type === 'GET_PAGE_THUMBNAIL') {
+      sendResponse({
+        ok: true,
+        thumbnailUrl: getPageThumbnailUrl() || '',
+        pageUrl: window.location.href,
+      });
+      return;
+    }
+
     if (message.type === 'GET_PAGE_IMAGES') {
       const images = collectDomImageCandidates();
       sendResponse({ ok: true, images, count: images.length });
