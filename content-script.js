@@ -6,15 +6,94 @@
 
   const EVENT_NAME = '__CONSOLE_CAPTURE_EVENT__';
   const LOG_LIMIT = 5000;
-  const CONTEXT_MAX_TEXT_CHARS = 12000;
-  const CONTEXT_FULL_TEXT_LIMIT = 26000;
+  const CONTEXT_MAX_TEXT_CHARS = 22000;
+  const CONTEXT_FULL_TEXT_LIMIT = 120000;
   const CONTEXT_RELEVANT_LINES = 18;
   const CONTEXT_MAX_INTERACTIVES = 36;
   const CONTEXT_MAX_HEADINGS = 20;
   const CONTEXT_MAX_LINKS = 20;
   const CONTEXT_MAX_SECTIONS = 8;
-  const CONTEXT_OUTPUT_MAX_CHARS = 10000;
+  const CONTEXT_MAX_TRANSCRIPT_LINES = 120;
+  const CONTEXT_MAX_SOURCE_LINES = 2400;
+  const CONTEXT_OUTPUT_MAX_CHARS = 90000;
+  const CONTEXT_SCROLL_STEP_FACTOR = 0.82;
+  const CONTEXT_SCROLL_MAX_STEPS = 48;
+  const CONTEXT_SCROLL_SETTLE_MS = 130;
+  const CONTEXT_TOP_FRAME_SHELL_DELAY_MS = 9000;
+  const CONTEXT_TOP_FRAME_LOW_SIGNAL_DELAY_MS = 2200;
   const CONTEXT_NOISE_SELECTORS = ['script', 'style', 'noscript', 'template'];
+  const CONTEXT_LAYOUT_NOISE_SELECTORS = [
+    'header',
+    'footer',
+    'nav',
+    'aside',
+    '[role="banner"]',
+    '[role="navigation"]',
+    '[role="contentinfo"]',
+    '[aria-label*="cookie" i]',
+    '[aria-label*="consent" i]',
+    '[id*="cookie" i]',
+    '[id*="consent" i]',
+    '[class*="cookie" i]',
+    '[class*="consent" i]',
+  ];
+  const CONTEXT_MAIN_ROOT_SELECTORS = [
+    'main',
+    '[role="main"]',
+    'article',
+    '#main',
+    '#content',
+    '[data-testid*="conversation" i]',
+    '[aria-label*="conversation" i]',
+    '[aria-label*="messages" i]',
+    '[id*="content" i]',
+    '[class*="content" i]',
+  ];
+  const CONTEXT_TEXT_BLOCK_SELECTORS = [
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'p',
+    'li',
+    'blockquote',
+    'figcaption',
+    'article',
+    'section',
+    'main',
+    'div',
+    'span',
+  ];
+  const CHAT_MESSAGE_SELECTORS_BY_HOST = {
+    'instagram.com': [
+      '[data-pagelet="IGDMessagesList"] div[dir="auto"]',
+      '[data-pagelet="IGDMessagesList"] span[dir="auto"]',
+      '[data-pagelet="IGDMessagesList"] [style*="opacity: 1"] div[dir="auto"]',
+      '[role="main"] [role="listitem"]',
+      'main [role="listitem"]',
+      '[role="main"] div[dir="auto"]',
+      'main div[dir="auto"]',
+      '[role="log"] [role="listitem"]',
+    ],
+    'facebook.com': [
+      '[role="main"] [role="listitem"]',
+      '[role="main"] [role="row"]',
+      '[aria-label*="Conversation" i] [dir="auto"]',
+      '[role="log"] [role="article"]',
+      '[data-testid*="message" i]',
+    ],
+  };
+  const CHAT_MESSAGE_SELECTORS_GENERIC = [
+    '[role="log"] [role="listitem"]',
+    '[role="log"] [role="article"]',
+    '[role="feed"] [role="article"]',
+    '[data-testid*="message" i]',
+    '[class*="message" i] p',
+    '[class*="chat" i] p',
+  ];
+  const CONTEXT_LAYOUT_NOISE_SELECTOR_QUERY = CONTEXT_LAYOUT_NOISE_SELECTORS.join(',');
+  const CONTEXT_MAIN_ROOT_SELECTOR_QUERY = CONTEXT_MAIN_ROOT_SELECTORS.join(',');
+  const CONTEXT_TEXT_BLOCK_SELECTOR_QUERY = CONTEXT_TEXT_BLOCK_SELECTORS.join(',');
   const logs = [];
 
   // === Video ID Generator ===
@@ -136,6 +215,12 @@
 
   function normalizeWhitespace(text) {
     return text.replace(/\s+/g, ' ').trim();
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
   }
 
   function compressStack(text, maxStackLines) {
@@ -485,38 +570,647 @@ ${rows}
     return clone;
   }
 
-  function collectFullPageText() {
+  function getNormalizedHost() {
+    return window.location.hostname.toLowerCase().replace(/^www\./, '');
+  }
+
+  function hostMatches(host, domain) {
+    return host === domain || host.endsWith(`.${domain}`);
+  }
+
+  function isNodeInsideLayoutNoise(node) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    if (node.matches(CONTEXT_LAYOUT_NOISE_SELECTOR_QUERY)) {
+      return true;
+    }
+    return Boolean(node.closest(CONTEXT_LAYOUT_NOISE_SELECTOR_QUERY));
+  }
+
+  function isLikelyPayloadLine(line) {
+    if (!line) {
+      return false;
+    }
+    const braceDensity = (line.match(/[{}[\]<>=;]/g) || []).length / Math.max(1, line.length);
+    if (braceDensity > 0.16 && !/[.!?]/.test(line)) {
+      return true;
+    }
+    if (
+      /^\{.*\}$/.test(line) &&
+      /(require|Bootloader|ScheduledServerJS|qplTimingsServerJS|rsrcMap|__bbox)/i.test(line)
+    ) {
+      return true;
+    }
+    if (
+      /(function\s*\(|=>|const\s+[a-z$_]|let\s+[a-z$_]|var\s+[a-z$_]|<\/?[a-z][^>]*>)/i.test(
+        line
+      ) &&
+      /[{[;]/.test(line)
+    ) {
+      return true;
+    }
+    if (/https?:\/\/[^\s]+\.js(\?|$)/i.test(line) && line.length > 80) {
+      return true;
+    }
+    if (/^[A-Za-z0-9+/=]{80,}$/.test(line.replace(/\s+/g, ''))) {
+      return true;
+    }
+    return false;
+  }
+
+  function isLikelyUiChromeLine(line) {
+    if (!line) {
+      return true;
+    }
+    if (line.length <= 2) {
+      return true;
+    }
+    if (
+      /^(home|menu|search|about|contact|privacy|terms|cookies?|settings|help|next|previous|back)$/i.test(
+        line
+      )
+    ) {
+      return true;
+    }
+    if (
+      /^(log in|login|sign up|create account|accept all|reject all|allow all cookies)$/i.test(
+        line
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function isMeaningfulContentLine(line) {
+    if (!line) {
+      return false;
+    }
+    if (isLikelyPayloadLine(line) || isLikelyUiChromeLine(line)) {
+      return false;
+    }
+    const alphaCount = (line.match(/[A-Za-z]/g) || []).length;
+    const numberCount = (line.match(/\d/g) || []).length;
+    const symbolCount = (line.match(/[^A-Za-z0-9\s]/g) || []).length;
+    if (alphaCount === 0 && numberCount < 3) {
+      return false;
+    }
+    if (line.length > 26 && symbolCount > alphaCount * 1.2) {
+      return false;
+    }
+    return true;
+  }
+
+  function scoreRootCandidate(node) {
+    if (!(node instanceof Element)) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    if (node !== document.body && !isElementVisible(node)) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    const text = normalizeWhitespace(node.innerText || node.textContent || '');
+    if (!text) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    const textLength = text.length;
+    if (textLength < 80 && node !== document.body) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    let score = Math.min(40, Math.floor(textLength / 220));
+    if (node.matches('main, article, [role="main"]')) {
+      score += 8;
+    }
+    if (node.matches('[data-testid*="conversation" i], [aria-label*="conversation" i], [aria-label*="messages" i]')) {
+      score += 10;
+    }
+    if (node.matches('#main, #content, [id*="content" i], [class*="content" i]')) {
+      score += 4;
+    }
+    if (node === document.body) {
+      score -= 4;
+    }
+    if (isNodeInsideLayoutNoise(node)) {
+      score -= 10;
+    }
+    const listLikeCount = node.querySelectorAll('p, li, [role="listitem"]').length;
+    score += Math.min(6, Math.floor(listLikeCount / 6));
+    return score;
+  }
+
+  function describeNode(node) {
+    if (!(node instanceof Element)) {
+      return 'unknown';
+    }
+    const tag = node.tagName.toLowerCase();
+    const id = node.id ? `#${node.id}` : '';
+    const className = normalizeWhitespace(node.className || '')
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .join('.');
+    const classSuffix = className ? `.${className}` : '';
+    return `${tag}${id}${classSuffix}`;
+  }
+
+  function selectPrimaryContentRoot() {
+    const roots = new Set();
+    document.querySelectorAll(CONTEXT_MAIN_ROOT_SELECTOR_QUERY).forEach((node) =>
+      roots.add(node)
+    );
+    if (document.body) {
+      roots.add(document.body);
+    }
+    let bestNode = document.body || document.documentElement;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (const candidate of roots) {
+      const score = scoreRootCandidate(candidate);
+      if (score > bestScore) {
+        bestNode = candidate;
+        bestScore = score;
+      }
+    }
+    return {
+      node: bestNode,
+      hint: describeNode(bestNode),
+    };
+  }
+
+  function collectUniqueVisibleLinesFromNodes(nodes, options) {
+    if (!options) options = {};
+    const maxLines = Number.isFinite(options.maxLines)
+      ? options.maxLines
+      : CONTEXT_MAX_SOURCE_LINES;
+    const lines = [];
+    const seen = new Set();
+    for (const node of nodes) {
+      if (!(node instanceof Element)) {
+        continue;
+      }
+      if (!isElementVisible(node)) {
+        continue;
+      }
+      if (isNodeInsideLayoutNoise(node)) {
+        continue;
+      }
+      const rawText = node.innerText || node.textContent || '';
+      if (!rawText) {
+        continue;
+      }
+      if (
+        node.children.length > 0 &&
+        rawText.length > 320 &&
+        !node.matches('p, li, blockquote, figcaption, pre, h1, h2, h3, h4')
+      ) {
+        continue;
+      }
+      const parts = rawText.split('\n');
+      for (const part of parts) {
+        const line = normalizeWhitespace(part);
+        if (!isMeaningfulContentLine(line)) {
+          continue;
+        }
+        const dedupeKey = line.toLowerCase();
+        if (seen.has(dedupeKey)) {
+          continue;
+        }
+        seen.add(dedupeKey);
+        lines.push(line);
+        if (lines.length >= maxLines) {
+          return lines;
+        }
+      }
+    }
+    return lines;
+  }
+
+  function isLikelyChatPage() {
+    const host = getNormalizedHost();
+    const path = window.location.pathname.toLowerCase();
+    if (hostMatches(host, 'instagram.com') && path.includes('/direct')) {
+      return true;
+    }
+    if (hostMatches(host, 'facebook.com') && /(messages|\/t\/)/.test(path)) {
+      return true;
+    }
+    return Boolean(
+      document.querySelector(
+        '[role="log"], [role="feed"], [aria-label*="conversation" i], [data-testid*="message" i]'
+      )
+    );
+  }
+
+  function getChatSelectorsForCurrentHost() {
+    const host = getNormalizedHost();
+    const selectors = [...CHAT_MESSAGE_SELECTORS_GENERIC];
+    for (const [domain, domainSelectors] of Object.entries(
+      CHAT_MESSAGE_SELECTORS_BY_HOST
+    )) {
+      if (hostMatches(host, domain)) {
+        selectors.unshift(...domainSelectors);
+      }
+    }
+    return Array.from(new Set(selectors));
+  }
+
+  function collectChatCandidateNodes(selectors) {
+    const candidateSet = new Set();
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((node) => candidateSet.add(node));
+    }
+    return Array.from(candidateSet).sort((a, b) => {
+      if (a === b) return 0;
+      const position = a.compareDocumentPosition(b);
+      if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    });
+  }
+
+  function isLikelyInstagramShellFrameUrl() {
+    const host = getNormalizedHost();
+    const path = window.location.pathname.toLowerCase();
+    return hostMatches(host, 'facebook.com') && /^\/instagram\/login_sync\/?/.test(path);
+  }
+
+  function collectInstagramDmPageletLines() {
+    const pagelet = document.querySelector('[data-pagelet="IGDMessagesList"]');
+    if (!pagelet) {
+      return [];
+    }
+
+    const nodes = pagelet.querySelectorAll('span[dir="auto"], div[dir="auto"]');
+    const lines = [];
+    const seen = new Set();
+
+    for (const node of nodes) {
+      if (!(node instanceof Element)) {
+        continue;
+      }
+      if (node.closest('[role="progressbar"]')) {
+        continue;
+      }
+      if (node.closest('a[aria-label*="Open the profile page" i]')) {
+        continue;
+      }
+
+      let hiddenByOpacity = false;
+      let walker = node;
+      for (let depth = 0; walker && walker !== pagelet && depth < 12; depth += 1) {
+        const styleAttr = walker.getAttribute('style') || '';
+        if (/opacity\s*:\s*0(?:[; ]|$)/i.test(styleAttr)) {
+          hiddenByOpacity = true;
+          break;
+        }
+        walker = walker.parentElement;
+      }
+      if (hiddenByOpacity) {
+        continue;
+      }
+
+      if (!isElementVisible(node)) {
+        continue;
+      }
+
+      const nestedDirNodes = node.querySelectorAll('[dir="auto"]').length;
+      const text = normalizeWhitespace(node.textContent || '');
+      if (!text || text.length < 2) {
+        continue;
+      }
+      if (nestedDirNodes > 0 && text.length > 280) {
+        continue;
+      }
+      if (/^(loading|loading\.\.\.|user-profile-picture)$/i.test(text)) {
+        continue;
+      }
+      if (!isMeaningfulContentLine(text) && !/\d{1,2}:\d{2}/.test(text)) {
+        continue;
+      }
+      const key = text.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      lines.push(text);
+    }
+
+    return lines;
+  }
+
+  function normalizeTranscriptLines(lines) {
+    return lines.filter(
+      (line) =>
+        !/^(type a message|message|send|seen|delivered|new message|search|details|info|chat info|loading|loading\.\.\.)$/i.test(
+          line
+        )
+    );
+  }
+
+  function appendUniqueLines(target, seen, incoming, maxLines) {
+    for (const line of incoming) {
+      const normalized = normalizeWhitespace(line);
+      if (!normalized) {
+        continue;
+      }
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      target.push(normalized);
+      if (target.length >= maxLines) {
+        return;
+      }
+    }
+  }
+
+  function isScrollableElement(node) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    if (!isElementVisible(node)) {
+      return false;
+    }
+    const style = window.getComputedStyle(node);
+    const overflowY = style.overflowY || '';
+    if (!/(auto|scroll)/i.test(overflowY)) {
+      return false;
+    }
+    return node.scrollHeight - node.clientHeight > 80;
+  }
+
+  function pickBestChatScrollContainer(selectors) {
+    const query = [
+      '[data-pagelet="IGDMessagesList"]',
+      '[role="log"]',
+      '[aria-label*="conversation" i]',
+      '[data-testid*="conversation" i]',
+      '[class*="conversation" i]',
+      '[class*="chat" i]',
+      '[role="main"]',
+      'main',
+    ].join(',');
+    const candidates = Array.from(document.querySelectorAll(query)).filter(
+      (node) => isScrollableElement(node)
+    );
+    let best = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (const node of candidates) {
+      const messageCount = node.querySelectorAll(selectors.join(',')).length;
+      const viewportBonus = Math.floor((node.clientHeight || 0) / 120);
+      const depthBonus = Math.floor(
+        (node.scrollHeight || 0) / Math.max(1, node.clientHeight || 1)
+      );
+      const score = messageCount * 8 + viewportBonus + Math.min(20, depthBonus);
+      if (score > bestScore) {
+        best = node;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  async function captureWhileElementScrolls(element, captureStep) {
+    if (!(element instanceof Element)) {
+      return;
+    }
+    const originalTop = element.scrollTop;
+    const originalBehavior = element.style.scrollBehavior;
+    element.style.scrollBehavior = 'auto';
+    try {
+      element.scrollTop = 0;
+      await sleep(CONTEXT_SCROLL_SETTLE_MS);
+      for (let step = 0; step < CONTEXT_SCROLL_MAX_STEPS; step += 1) {
+        captureStep();
+        const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
+        if (maxTop <= 0 || element.scrollTop >= maxTop - 2) {
+          break;
+        }
+        const delta = Math.max(
+          140,
+          Math.floor(element.clientHeight * CONTEXT_SCROLL_STEP_FACTOR)
+        );
+        const nextTop = Math.min(maxTop, element.scrollTop + delta);
+        if (nextTop === element.scrollTop) {
+          break;
+        }
+        element.scrollTop = nextTop;
+        await sleep(CONTEXT_SCROLL_SETTLE_MS);
+      }
+      captureStep();
+    } finally {
+      element.scrollTop = originalTop;
+      element.style.scrollBehavior = originalBehavior;
+    }
+  }
+
+  async function captureWhileWindowScrolls(captureStep) {
+    const scroller = document.scrollingElement || document.documentElement;
+    if (!scroller) {
+      captureStep();
+      return;
+    }
+    const originalTop = scroller.scrollTop;
+    const originalBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    try {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      await sleep(CONTEXT_SCROLL_SETTLE_MS);
+      for (let step = 0; step < CONTEXT_SCROLL_MAX_STEPS; step += 1) {
+        captureStep();
+        const maxTop = Math.max(0, scroller.scrollHeight - window.innerHeight);
+        if (maxTop <= 0 || scroller.scrollTop >= maxTop - 2) {
+          break;
+        }
+        const delta = Math.max(
+          200,
+          Math.floor(window.innerHeight * CONTEXT_SCROLL_STEP_FACTOR)
+        );
+        const nextTop = Math.min(maxTop, scroller.scrollTop + delta);
+        if (nextTop === scroller.scrollTop) {
+          break;
+        }
+        window.scrollTo({ top: nextTop, left: 0, behavior: 'auto' });
+        await sleep(CONTEXT_SCROLL_SETTLE_MS);
+      }
+      captureStep();
+    } finally {
+      window.scrollTo({ top: originalTop, left: 0, behavior: 'auto' });
+      document.documentElement.style.scrollBehavior = originalBehavior;
+    }
+  }
+
+  function collectChatTranscriptLinesSnapshot(selectors) {
+    const instagramPageletLines = collectInstagramDmPageletLines();
+    if (instagramPageletLines.length > 0) {
+      return normalizeTranscriptLines(instagramPageletLines);
+    }
+
+    const candidates = collectChatCandidateNodes(selectors);
+    const scopedLines = normalizeTranscriptLines(
+      collectUniqueVisibleLinesFromNodes(candidates, {
+        maxLines: CONTEXT_MAX_SOURCE_LINES,
+      })
+    );
+    if (scopedLines.length > 0) {
+      return scopedLines;
+    }
     const source =
       document.body?.innerText ||
       document.documentElement?.innerText ||
       '';
-    const lines = source
-      .split('\n')
-      .map((line) => normalizeWhitespace(line))
-      .filter(Boolean);
-    const fullText = lines.join('\n');
+    return normalizeTranscriptLines(
+      source
+        .split('\n')
+        .map((line) => normalizeWhitespace(line))
+        .filter((line) => line.length >= 2 && !isLikelyPayloadLine(line))
+        .slice(0, CONTEXT_MAX_SOURCE_LINES)
+    );
+  }
+
+  async function collectChatTranscriptLines(options) {
+    if (!options) options = {};
+    if (!isLikelyChatPage()) {
+      return {
+        mode: 'prominent-content',
+        lines: [],
+        transcriptLines: [],
+        rootHint: '',
+      };
+    }
+
+    const selectors = getChatSelectorsForCurrentHost();
+    const lines = [];
+    const seen = new Set();
+    const captureStep = () => {
+      const nextLines = collectChatTranscriptLinesSnapshot(selectors);
+      appendUniqueLines(lines, seen, nextLines, CONTEXT_MAX_SOURCE_LINES);
+    };
+
+    captureStep();
+    if (options.autoScroll && lines.length < CONTEXT_MAX_SOURCE_LINES) {
+      const container = pickBestChatScrollContainer(selectors);
+      if (container) {
+        await captureWhileElementScrolls(container, captureStep);
+      } else {
+        await captureWhileWindowScrolls(captureStep);
+      }
+    }
+
+    if (lines.length < 6) {
+      return {
+        mode: 'prominent-content',
+        lines: [],
+        transcriptLines: [],
+        rootHint: '',
+      };
+    }
+
     return {
-      sourceChars: source.length,
-      fullText,
+      mode: 'chat-transcript',
       lines,
+      transcriptLines: lines.slice(-CONTEXT_MAX_TRANSCRIPT_LINES),
+      rootHint: 'chat-thread',
+    };
+  }
+
+  function collectProminentLinesSnapshot() {
+    const { node: rootNode, hint: rootHint } = selectPrimaryContentRoot();
+    const scopedNodes = [
+      rootNode,
+      ...rootNode.querySelectorAll(CONTEXT_TEXT_BLOCK_SELECTOR_QUERY),
+    ];
+    let lines = collectUniqueVisibleLinesFromNodes(scopedNodes, {
+      maxLines: CONTEXT_MAX_SOURCE_LINES,
+    });
+    if (lines.length === 0) {
+      const source =
+        document.body?.innerText ||
+        document.documentElement?.innerText ||
+        '';
+      lines = source
+        .split('\n')
+        .map((line) => normalizeWhitespace(line))
+        .filter((line) => line.length >= 2 && !isLikelyPayloadLine(line))
+        .slice(0, CONTEXT_MAX_SOURCE_LINES);
+    }
+    return {
+      lines,
+      rootHint,
+    };
+  }
+
+  async function collectProminentLinesWithScroll(options) {
+    if (!options) options = {};
+    const mergedLines = [];
+    const seen = new Set();
+    let rootHint = '';
+    const captureStep = () => {
+      const snap = collectProminentLinesSnapshot();
+      if (snap.rootHint) {
+        rootHint = snap.rootHint;
+      }
+      appendUniqueLines(mergedLines, seen, snap.lines, CONTEXT_MAX_SOURCE_LINES);
+    };
+    captureStep();
+    if (options.autoScroll && mergedLines.length < CONTEXT_MAX_SOURCE_LINES) {
+      await captureWhileWindowScrolls(captureStep);
+    }
+    return {
+      lines: mergedLines,
+      rootHint,
+    };
+  }
+
+  async function collectFullPageText(options) {
+    if (!options) options = {};
+    const transcript = await collectChatTranscriptLines({
+      autoScroll: options.autoScroll,
+    });
+    if (transcript.mode === 'chat-transcript') {
+      const fullText = transcript.lines.join('\n');
+      return {
+        sourceChars: fullText.length,
+        fullText,
+        lines: transcript.lines,
+        extractionMode: transcript.mode,
+        transcriptLines: transcript.transcriptLines,
+        rootHint: transcript.rootHint,
+      };
+    }
+
+    const prominent = await collectProminentLinesWithScroll({
+      autoScroll: options.autoScroll,
+    });
+    const fullText = prominent.lines.join('\n');
+    return {
+      sourceChars: fullText.length,
+      fullText,
+      lines: prominent.lines,
+      extractionMode: 'prominent-content',
+      transcriptLines: [],
+      rootHint: prominent.rootHint,
     };
   }
 
   function scoreRelevantLine(line, index) {
-    const hasKeyword = /(error|warning|failed|failure|critical|issue|problem|bug|exception|fix|payment|checkout|login|auth|order|total|price|api|token|required|important)/i.test(
+    const hasKeyword = /(error|warning|failed|failure|critical|issue|problem|bug|exception|fix|payment|checkout|login|auth|order|total|price|api|token|required|important|message|conversation|summary)/i.test(
       line
     );
-    const navNoise = /^(home|menu|search|about|contact|privacy|terms|cookies?)$/i.test(
+    const navNoise = /^(home|menu|search|about|contact|privacy|terms|cookies?|settings|help)$/i.test(
       line
     );
     let score = 0;
-    if (line.length >= 35 && line.length <= 220) {
-      score += 2;
-    } else if (line.length > 220) {
+    if (line.length >= 24 && line.length <= 240) {
+      score += 3;
+    } else if (line.length > 240) {
+      score += 1;
+    }
+    if (/[.!?]/.test(line)) {
       score += 1;
     }
     if (hasKeyword) {
-      score += 3;
+      score += 2;
     }
     if (/\d/.test(line)) {
       score += 1;
@@ -524,19 +1218,31 @@ ${rows}
     if (/[$£€%]/.test(line)) {
       score += 1;
     }
-    if (index < 120) {
+    if (index < 100) {
       score += 1;
     }
     if (navNoise) {
-      score -= 3;
+      score -= 4;
+    }
+    if (isLikelyPayloadLine(line)) {
+      score -= 8;
     }
     return score;
   }
 
-  function collectRelevantLines(lines) {
-    const ranked = lines
+  function collectRelevantLines(lines, options) {
+    if (!options) options = {};
+    const mode = typeof options.mode === 'string' ? options.mode : 'prominent-content';
+    const normalizedLines = lines.filter((line) => isMeaningfulContentLine(line));
+    if (mode === 'chat-transcript') {
+      return normalizedLines
+        .slice(-CONTEXT_RELEVANT_LINES)
+        .map((line) => truncateText(line, 240));
+    }
+
+    const ranked = normalizedLines
       .map((line, index) => ({ line, index, score: scoreRelevantLine(line, index) }))
-      .filter((item) => item.line.length >= 25 && item.score > 0)
+      .filter((item) => item.line.length >= 18 && item.score > 0)
       .sort((a, b) => b.score - a.score || a.index - b.index);
 
     const picked = [];
@@ -554,7 +1260,9 @@ ${rows}
     }
 
     if (picked.length === 0) {
-      return lines.slice(0, CONTEXT_RELEVANT_LINES).map((line) => truncateText(line, 240));
+      return normalizedLines
+        .slice(0, CONTEXT_RELEVANT_LINES)
+        .map((line) => truncateText(line, 240));
     }
 
     return picked.map((line) => truncateText(line, 240));
@@ -655,16 +1363,23 @@ ${rows}
     };
   }
 
-  function extractPageContext(options) {
+  async function extractPageContext(options) {
     if (!options) options = {};
     const rootClone = pruneFullPageDom();
     const cleanedText = textFromNode(rootClone);
-    const { sourceChars, fullText, lines } = collectFullPageText();
+    const {
+      sourceChars,
+      fullText,
+      lines,
+      extractionMode,
+      transcriptLines,
+      rootHint,
+    } = await collectFullPageText({ autoScroll: Boolean(options.autoScroll) });
     const maxContextChars = Number.isFinite(options.maxContextChars)
       ? options.maxContextChars
       : CONTEXT_FULL_TEXT_LIMIT;
     const fullTextSample = truncateText(fullText, maxContextChars);
-    const relevantLines = collectRelevantLines(lines);
+    const relevantLines = collectRelevantLines(lines, { mode: extractionMode });
     const snippets = collectSectionSnippets(lines);
     const truncated = fullTextSample.length < fullText.length;
 
@@ -696,10 +1411,12 @@ ${rows}
         ),
       },
       content: {
-        rootSelector: 'body',
+        rootSelector: rootHint || 'body',
+        extractionMode,
         summaryText: truncateText(cleanedText, CONTEXT_MAX_TEXT_CHARS),
         fullTextSample,
         relevantLines,
+        transcriptLines: transcriptLines.map((line) => truncateText(line, 220)),
         snippets,
         interactiveElements: collectInteractiveElements(),
         headings: collectHeadings(),
@@ -718,10 +1435,16 @@ ${rows}
 
   function buildContextMarkdown(pageContext) {
     const lines = [];
-    lines.push('# Page Context (Relevant From Full Page Capture)');
+    lines.push('# Page Context (Prominent Content Capture)');
     lines.push(`- URL: ${pageContext.page.url}`);
     lines.push(`- Title: ${pageContext.page.title || '[none]'}`);
-    lines.push('- Scan mode: full rendered DOM text (console excluded)');
+    const modeLabel =
+      pageContext.content.extractionMode === 'chat-transcript'
+        ? 'chat transcript extraction (conversation-priority)'
+        : 'prominent visible content extraction (layout-noise filtered)';
+    lines.push(`- Scan mode: ${modeLabel}`);
+    lines.push('- Capture flow: auto-scroll sweep from top to bottom');
+    lines.push(`- Primary root: ${pageContext.content.rootSelector}`);
     if (pageContext.meta.description) {
       lines.push(`- Description: ${pageContext.meta.description}`);
     }
@@ -743,6 +1466,17 @@ ${rows}
       lines.push('- No high-signal lines detected; use supporting snippets below.');
     }
     lines.push('');
+
+    if (
+      pageContext.content.extractionMode === 'chat-transcript' &&
+      pageContext.content.transcriptLines.length > 0
+    ) {
+      lines.push('## Chat Transcript');
+      pageContext.content.transcriptLines.forEach((line) => {
+        lines.push(`- ${line}`);
+      });
+      lines.push('');
+    }
 
     if (pageContext.content.headings.length > 0) {
       lines.push('## Page Headings');
@@ -785,8 +1519,17 @@ ${rows}
       lines.push('');
     }
 
+    lines.push('## Full Text Capture');
+    if (pageContext.content.fullTextSample) {
+      lines.push(pageContext.content.fullTextSample);
+    } else {
+      lines.push('[no text captured]');
+    }
+    lines.push('');
+
     lines.push('');
     lines.push('## Context Stats');
+    lines.push(`- Extraction mode: ${pageContext.content.extractionMode}`);
     lines.push(
       `- Text included: ${pageContext.content.textCharsIncluded}/${pageContext.content.textCharsOriginal} chars`
     );
@@ -803,9 +1546,10 @@ ${rows}
     return `${raw.slice(0, CONTEXT_OUTPUT_MAX_CHARS)}\n\n... [truncated ${hidden} chars for prompt efficiency]`;
   }
 
-  function buildContextPayload(options) {
-    const pageContext = extractPageContext({
+  async function buildContextPayload(options) {
+    const pageContext = await extractPageContext({
       maxContextChars: options.maxContextChars,
+      autoScroll: options.autoScroll,
     });
     const text = buildContextMarkdown(pageContext);
 
@@ -1711,18 +2455,42 @@ ${rows}
     }
 
     if (message.type === 'GET_AI_CONTEXT') {
-      const maxContextChars = Number(message.maxContextChars);
-      const contextPayload = buildContextPayload({
-        maxContextChars: Number.isFinite(maxContextChars)
-          ? Math.min(60000, Math.max(6000, Math.floor(maxContextChars)))
-          : CONTEXT_FULL_TEXT_LIMIT,
+      (async () => {
+        const maxContextChars = Number(message.maxContextChars);
+        const contextPayload = await buildContextPayload({
+          maxContextChars: Number.isFinite(maxContextChars)
+            ? Math.min(140000, Math.max(6000, Math.floor(maxContextChars)))
+            : CONTEXT_FULL_TEXT_LIMIT,
+          autoScroll: true,
+        });
+        const lowSignal =
+          (Number(contextPayload.sourceTextChars) || 0) < 80 ||
+          (Number(contextPayload.relevantCount) || 0) === 0;
+        if (window === window.top && lowSignal) {
+          await sleep(
+            isLikelyInstagramShellFrameUrl()
+              ? CONTEXT_TOP_FRAME_SHELL_DELAY_MS
+              : CONTEXT_TOP_FRAME_LOW_SIGNAL_DELAY_MS
+          );
+        }
+        if (lowSignal && window !== window.top) {
+          return;
+        }
+        sendResponse({
+          ok: true,
+          format: 'ai-context-markdown',
+          ...contextPayload,
+        });
+      })().catch((error) => {
+        sendResponse({
+          ok: false,
+          error:
+            error && typeof error.message === 'string'
+              ? error.message
+              : 'Context extraction failed.',
+        });
       });
-      sendResponse({
-        ok: true,
-        format: 'ai-context-markdown',
-        ...contextPayload,
-      });
-      return;
+      return true;
     }
 
     if (message.type === 'SCAN_PAGE_VIDEOS') {

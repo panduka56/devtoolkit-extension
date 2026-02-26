@@ -121,7 +121,7 @@ const imageFormatSelect = document.getElementById('imageFormatSelect');
 const imageSameDomainToggle = document.getElementById('imageSameDomainToggle');
 const imageDedupeToggle = document.getElementById('imageDedupeToggle');
 
-const CONTEXT_EXTRACTION_MAX_CHARS = 42000;
+const CONTEXT_EXTRACTION_MAX_CHARS = 120000;
 const DEFAULT_LOCAL_HELPER_URL = 'http://192.168.4.15:38086';
 const LOCAL_HELPER_WEB_UI_URL = `${DEFAULT_LOCAL_HELPER_URL}/youtube-dl`;
 const LOCAL_HELPER_SMB_URL = 'smb://192.168.4.15/X-Downloads/Youtube%20DL/';
@@ -920,7 +920,7 @@ async function sendReportRequest(tabId, settings) {
 async function sendContextRequest(tabId) {
   return withTimeout(
     chrome.tabs.sendMessage(tabId, buildContextRequestPayload()),
-    12000
+    30000
   );
 }
 
