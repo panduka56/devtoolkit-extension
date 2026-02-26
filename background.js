@@ -29,6 +29,358 @@ const helperTypeCache = new Map();
 const DEFAULT_LOCAL_HELPER_URL = 'http://192.168.4.15:38086';
 const LOCAL_HELPER_TIMEOUT_MS = 10 * 60 * 1000;
 
+// === Debugger-Based Console Capture (per tab, in-memory) ===
+
+const CONSOLE_LOG_LIMIT = 2000;
+const debuggerAttachedTabs = new Map(); // tabId → { logs: [], url: '' }
+
+const CONSOLE_LEVEL_MAP = {
+  log: 'log',
+  info: 'info',
+  warning: 'warn',
+  error: 'error',
+  debug: 'debug',
+  assert: 'error',
+  dir: 'log',
+  dirxml: 'log',
+  table: 'log',
+  trace: 'warn',
+  clear: 'log',
+  startGroup: 'log',
+  startGroupCollapsed: 'log',
+  endGroup: 'log',
+  count: 'log',
+  timeEnd: 'log',
+  profile: 'log',
+  profileEnd: 'log',
+};
+
+function cdpArgToString(remoteObject) {
+  if (!remoteObject) return 'undefined';
+  if (remoteObject.type === 'undefined') return 'undefined';
+  if (remoteObject.type === 'string') return remoteObject.value ?? '';
+  if (remoteObject.type === 'number' || remoteObject.type === 'boolean')
+    return String(remoteObject.value);
+  if (remoteObject.subtype === 'null') return 'null';
+  if (remoteObject.type === 'object') {
+    if (remoteObject.preview?.properties) {
+      const props = remoteObject.preview.properties
+        .map((p) => `${p.name}: ${p.value ?? p.type}`)
+        .join(', ');
+      return `{${props}}`;
+    }
+    return remoteObject.description || remoteObject.className || '[Object]';
+  }
+  if (remoteObject.type === 'function')
+    return remoteObject.description || '[Function]';
+  if (remoteObject.type === 'symbol')
+    return remoteObject.description || 'Symbol()';
+  return remoteObject.description || String(remoteObject.value ?? '');
+}
+
+function formatCdpArgs(args) {
+  if (!Array.isArray(args) || args.length === 0) return '';
+  return args.map(cdpArgToString).join(' ');
+}
+
+function formatCdpStackTrace(stackTrace) {
+  if (!stackTrace?.callFrames?.length) return '';
+  return stackTrace.callFrames
+    .slice(0, 6)
+    .map(
+      (f) =>
+        `    at ${f.functionName || '(anonymous)'} (${f.url}:${f.lineNumber + 1}:${f.columnNumber + 1})`
+    )
+    .join('\n');
+}
+
+function getTabConsoleLogs(tabId) {
+  const entry = debuggerAttachedTabs.get(tabId);
+  return entry ? entry.logs : [];
+}
+
+function clearTabConsoleLogs(tabId) {
+  const entry = debuggerAttachedTabs.get(tabId);
+  if (entry) {
+    entry.logs = [];
+  }
+}
+
+async function attachDebuggerToTab(tabId) {
+  if (debuggerAttachedTabs.has(tabId)) {
+    return { ok: true, alreadyAttached: true };
+  }
+
+  let tabUrl = '';
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    tabUrl = tab.url || '';
+    if (
+      tabUrl.startsWith('chrome://') ||
+      tabUrl.startsWith('chrome-extension://') ||
+      tabUrl.startsWith('devtools://') ||
+      tabUrl.startsWith('about:')
+    ) {
+      return { ok: false, error: 'Cannot attach debugger to this page type.' };
+    }
+  } catch {
+    return { ok: false, error: 'Tab not found.' };
+  }
+
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+  } catch (err) {
+    return {
+      ok: false,
+      error: err?.message || 'Failed to attach debugger.',
+    };
+  }
+
+  debuggerAttachedTabs.set(tabId, { logs: [], url: tabUrl });
+
+  try {
+    await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+  } catch {
+    // If enable fails, detach and clean up
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch { /* ignore */ }
+    debuggerAttachedTabs.delete(tabId);
+    return { ok: false, error: 'Failed to enable Runtime domain.' };
+  }
+
+  return { ok: true, alreadyAttached: false };
+}
+
+async function detachDebuggerFromTab(tabId) {
+  if (!debuggerAttachedTabs.has(tabId)) {
+    return { ok: true, wasAttached: false };
+  }
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {
+    // May already be detached
+  }
+  debuggerAttachedTabs.delete(tabId);
+  return { ok: true, wasAttached: true };
+}
+
+// Listen for debugger events (console calls)
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (method !== 'Runtime.consoleAPICalled') return;
+  const tabId = source.tabId;
+  const entry = debuggerAttachedTabs.get(tabId);
+  if (!entry) return;
+
+  const level = CONSOLE_LEVEL_MAP[params.type] || 'log';
+  const message = formatCdpArgs(params.args);
+  const stack = formatCdpStackTrace(params.stackTrace);
+  const fullMessage = stack ? `${message}\n${stack}` : message;
+
+  entry.logs.push({
+    timestamp: new Date().toISOString(),
+    level,
+    source: 'console',
+    message: fullMessage,
+    args: params.args?.map(cdpArgToString) || [message],
+  });
+
+  // Enforce cap
+  if (entry.logs.length > CONSOLE_LOG_LIMIT) {
+    entry.logs = entry.logs.slice(-CONSOLE_LOG_LIMIT);
+  }
+});
+
+// Auto-detach when debugger is disconnected externally (user closes the bar etc.)
+chrome.debugger.onDetach.addListener((source, _reason) => {
+  if (source.tabId != null) {
+    debuggerAttachedTabs.delete(source.tabId);
+  }
+});
+
+// === Console Log Report Builder (mirrors content-script format) ===
+
+function includeByLevelPreset(level, preset) {
+  if (preset === 'errors') return level === 'error';
+  if (preset === 'warnings') return level === 'error' || level === 'warn';
+  return true;
+}
+
+function dedupeLogEntries(entries) {
+  const byKey = new Map();
+  const ordered = [];
+  for (const e of entries) {
+    const key = `${e.level}|${e.source}|${e.message}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.lastTimestamp = e.timestamp;
+    } else {
+      const next = { ...e, count: 1, lastTimestamp: e.timestamp };
+      byKey.set(key, next);
+      ordered.push(next);
+    }
+  }
+  return ordered;
+}
+
+function compressStackBg(text, maxStackLines) {
+  const lines = text
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  if (lines.length <= 1) return text;
+  const stackStart = lines.findIndex((l) => l.trimStart().startsWith('at '));
+  if (stackStart === -1) return lines.join(' | ');
+  const head = lines.slice(0, stackStart);
+  const stack = lines.slice(stackStart);
+  const kept = stack.slice(0, maxStackLines);
+  const hidden = stack.length - kept.length;
+  const compressed = head.concat(kept);
+  if (hidden > 0) compressed.push(`... +${hidden} stack frames`);
+  return compressed.join(' | ');
+}
+
+function normalizeWsBg(text) {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function truncateTextBg(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  const rem = text.length - maxChars;
+  return `${text.slice(0, maxChars)} ... [truncated ${rem} chars]`;
+}
+
+function optimizeMessageBg(message, opts) {
+  let text = message || '[empty log]';
+  text = compressStackBg(text, opts.maxStackLines || 6);
+  text = normalizeWsBg(text);
+  text = truncateTextBg(text, opts.maxCharsPerEntry || 700);
+  return text || '[empty log]';
+}
+
+function buildConsoleLevelCounts(entries) {
+  const counts = {};
+  for (const e of entries) {
+    const key = typeof e.level === 'string' ? e.level : 'log';
+    counts[key] = (counts[key] || 0) + (e.count || 1);
+  }
+  return counts;
+}
+
+function toSingleLineBg(text) {
+  return String(text).replaceAll('\n', '\\n');
+}
+
+function escapeXmlBg(text) {
+  return String(text)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+function buildConsoleReport(tabId, options) {
+  const logs = getTabConsoleLogs(tabId);
+  const tabEntry = debuggerAttachedTabs.get(tabId);
+  const pageUrl = tabEntry?.url || '';
+  const levelPreset = options.levelPreset || 'full';
+  const format = options.format || 'ai';
+  const optimizeForAi = options.optimizeForAi !== false;
+  const maxEntries = Number.isFinite(options.maxEntries)
+    ? Math.min(CONSOLE_LOG_LIMIT, Math.max(1, Math.floor(options.maxEntries)))
+    : logs.length;
+  const maxCharsPerEntry = Number.isFinite(options.maxCharsPerEntry) ? options.maxCharsPerEntry : 700;
+  const maxStackLines = Number.isFinite(options.maxStackLines) ? options.maxStackLines : 6;
+
+  const selected = logs.slice(Math.max(0, logs.length - maxEntries));
+  const normalized = selected
+    .map((entry) => {
+      const level = typeof entry.level === 'string' ? entry.level : 'log';
+      if (!includeByLevelPreset(level, levelPreset)) return null;
+      let message = entry.message || '[empty log]';
+      if (optimizeForAi) {
+        message = optimizeMessageBg(message, { maxCharsPerEntry, maxStackLines });
+      }
+      return {
+        timestamp: entry.timestamp || new Date().toISOString(),
+        level,
+        source: entry.source || 'console',
+        message,
+      };
+    })
+    .filter(Boolean);
+
+  const dedupe = optimizeForAi || format === 'ai';
+  const entries = dedupe
+    ? dedupeLogEntries(normalized)
+    : normalized.map((e) => ({ ...e, count: 1, lastTimestamp: e.timestamp }));
+
+  const levelCounts = buildConsoleLevelCounts(entries);
+  const totalCaptured = logs.length;
+  const totalCount = normalized.length;
+  const uniqueCount = entries.length;
+
+  let text;
+  if (format === 'plain') {
+    if (totalCount === 0) {
+      text = [`URL: ${pageUrl}`, 'Captured console logs: 0', '', 'No console logs captured yet.'].join('\n');
+    } else {
+      const header = [
+        `URL: ${pageUrl}`,
+        `Captured at: ${new Date().toISOString()}`,
+        `Captured console logs: ${totalCount}`,
+        `Unique after dedupe: ${uniqueCount}`,
+        '',
+      ];
+      const lines = entries.map((e, i) => {
+        const src = e.source ? ` [${e.source}]` : '';
+        const rep = e.count > 1 ? ` x${e.count}` : '';
+        return `${i + 1}. ${e.timestamp} [${e.level}]${src}${rep} ${e.message}`;
+      });
+      text = header.concat(lines).join('\n');
+    }
+  } else if (format === 'xml') {
+    const rows = entries
+      .map(
+        (e, i) =>
+          `<e i="${i + 1}" t="${escapeXmlBg(e.timestamp)}" l="${escapeXmlBg(e.level)}" s="${escapeXmlBg(e.source)}" c="${e.count}">${escapeXmlBg(e.message)}</e>`
+      )
+      .join('\n');
+    text = `<logs url="${escapeXmlBg(pageUrl)}" captured="${escapeXmlBg(new Date().toISOString())}" preset="${escapeXmlBg(levelPreset)}" total="${totalCount}" unique="${uniqueCount}">\n${rows}\n</logs>`;
+  } else {
+    // ai format
+    const header = [
+      'AI_LOGS_V1',
+      `url=${pageUrl}`,
+      `captured=${new Date().toISOString()}`,
+      `preset=${levelPreset}`,
+      `total=${totalCount}`,
+      `unique=${uniqueCount}`,
+      `levels=${JSON.stringify(levelCounts)}`,
+    ];
+    const lines = entries.map(
+      (e, i) => `${i + 1}|${e.timestamp}|${e.level}|${e.count}|${e.source}|${toSingleLineBg(e.message)}`
+    );
+    text = header.concat(lines).join('\n');
+  }
+
+  const estimatedTokens = Math.ceil(text.length / 4);
+
+  return {
+    totalCaptured,
+    totalCount,
+    uniqueCount,
+    levelCounts,
+    format,
+    levelPreset,
+    estimatedTokens,
+    pageUrl,
+    text,
+  };
+}
+
 function getVideoStorageArea() {
   return chrome.storage.session || chrome.storage.local;
 }
@@ -1375,6 +1727,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void clearTabVideos(tabId);
   void clearTabImages(tabId);
+  void detachDebuggerFromTab(tabId);
 });
 
 // === AI Config Helpers (ported from Console Signal background.js) ===
@@ -1746,6 +2099,80 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             : sender.tab?.id;
         const metadata = await getImageMetadata(tabId, message.url);
         sendResponse({ ok: true, metadata });
+        return;
+      }
+
+      // --- Console Capture (chrome.debugger) ---
+
+      if (message.type === 'START_CONSOLE_CAPTURE') {
+        const tabId = Number(message.tabId);
+        if (!Number.isInteger(tabId) || tabId < 0) {
+          throw new Error('Invalid tabId for console capture.');
+        }
+        const result = await attachDebuggerToTab(tabId);
+        sendResponse({
+          ok: result.ok,
+          alreadyAttached: result.alreadyAttached || false,
+          error: result.error || undefined,
+        });
+        return;
+      }
+
+      if (message.type === 'STOP_CONSOLE_CAPTURE') {
+        const tabId = Number(message.tabId);
+        if (!Number.isInteger(tabId) || tabId < 0) {
+          throw new Error('Invalid tabId for console capture.');
+        }
+        const result = await detachDebuggerFromTab(tabId);
+        sendResponse({
+          ok: result.ok,
+          wasAttached: result.wasAttached || false,
+        });
+        return;
+      }
+
+      if (message.type === 'GET_CAPTURED_CONSOLE') {
+        const tabId = Number(message.tabId);
+        if (!Number.isInteger(tabId) || tabId < 0) {
+          throw new Error('Invalid tabId for console capture.');
+        }
+        const report = buildConsoleReport(tabId, {
+          format: message.format,
+          levelPreset: message.levelPreset,
+          optimizeForAi: message.optimizeForAi,
+          maxEntries: message.maxEntries,
+          maxCharsPerEntry: message.maxCharsPerEntry,
+          maxStackLines: message.maxStackLines,
+        });
+        sendResponse({
+          ok: true,
+          ...report,
+        });
+        return;
+      }
+
+      if (message.type === 'CLEAR_CONSOLE_LOGS') {
+        const tabId = Number(message.tabId);
+        if (!Number.isInteger(tabId) || tabId < 0) {
+          throw new Error('Invalid tabId for console capture.');
+        }
+        clearTabConsoleLogs(tabId);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === 'GET_CONSOLE_STATUS') {
+        const tabId = Number(message.tabId);
+        if (!Number.isInteger(tabId) || tabId < 0) {
+          throw new Error('Invalid tabId for console capture.');
+        }
+        const isAttached = debuggerAttachedTabs.has(tabId);
+        const logCount = getTabConsoleLogs(tabId).length;
+        sendResponse({
+          ok: true,
+          capturing: isAttached,
+          logCount,
+        });
         return;
       }
 

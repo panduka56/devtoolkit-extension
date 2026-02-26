@@ -15,7 +15,8 @@
     "scripting",
     "activeTab",
     "sidePanel",
-    "webRequest"
+    "webRequest",
+    "debugger"
   ],
   "host_permissions": ["<all_urls>"],
   "action": {

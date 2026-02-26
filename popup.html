@@ -63,12 +63,28 @@
 
       <nav class="navBar" aria-label="Extension sections">
         <div class="categorySwitch" role="radiogroup" aria-label="Category">
-          <button class="categoryBtn is-active" type="button" data-category="video">Video</button>
-          <button class="categoryBtn" type="button" data-category="images">Images</button>
-          <button class="categoryBtn" type="button" data-category="console">Console</button>
-          <button class="categoryBtn" type="button" data-category="pageintel">Page Intel</button>
-          <button class="categoryBtn" type="button" data-category="context">Context</button>
-          <button class="categoryBtn" type="button" data-category="settings">Settings</button>
+          <button
+            class="categoryBtn is-active"
+            type="button"
+            data-category="video"
+          >
+            Video
+          </button>
+          <button class="categoryBtn" type="button" data-category="images">
+            Images
+          </button>
+          <button class="categoryBtn" type="button" data-category="console">
+            Console
+          </button>
+          <button class="categoryBtn" type="button" data-category="pageintel">
+            Page Intel
+          </button>
+          <button class="categoryBtn" type="button" data-category="context">
+            Context
+          </button>
+          <button class="categoryBtn" type="button" data-category="settings">
+            Settings
+          </button>
         </div>
         <div class="subTabs" id="subTabsBar"></div>
       </nav>
@@ -77,11 +93,24 @@
         <section class="card">
           <div class="cardHead">
             <h2>Detected Videos</h2>
-            <button id="downloadAllButton" class="actionBtn" type="button" style="display: none;">Download All</button>
+            <button
+              id="downloadAllButton"
+              class="actionBtn"
+              type="button"
+              style="display: none"
+            >
+              Download All
+            </button>
           </div>
-          <p class="hint">Direct streams are downloadable. Manifest-only or protected streams are shown as unavailable.</p>
+          <p class="hint">
+            Direct streams are downloadable. Manifest-only or protected streams
+            are shown as unavailable.
+          </p>
           <div class="videoBridgeBar">
-            <label class="toggleLabel videoBridgeToggle" for="useLocalDownloaderToggle">
+            <label
+              class="toggleLabel videoBridgeToggle"
+              for="useLocalDownloaderToggle"
+            >
               <span>Download mode</span>
               <span class="toggleWrap">
                 <input id="useLocalDownloaderToggle" type="checkbox" checked />
@@ -89,12 +118,21 @@
                 <strong>Use yt-dlp server</strong>
               </span>
             </label>
-            <button id="openYtdlpFolderButton" class="actionBtn" type="button">Open Download Folder</button>
+            <button id="openYtdlpFolderButton" class="actionBtn" type="button">
+              Open Download Folder
+            </button>
           </div>
-          <p id="videoModeHint" class="hint">Mode: yt-dlp server for YouTube/TikTok/Instagram.</p>
-          <p id="localDownloaderStatus" class="statusLine">Bridge: http://192.168.4.15:38086</p>
+          <p id="videoModeHint" class="hint">
+            Mode: yt-dlp server for YouTube/TikTok/Instagram.
+          </p>
+          <p id="localDownloaderStatus" class="statusLine">
+            Bridge: http://192.168.4.15:38086
+          </p>
           <div id="videoList" class="videoList">
-            <p class="hint">No videos detected on this page. Navigate to a page with video content.</p>
+            <p class="hint">
+              No videos detected on this page. Navigate to a page with video
+              content.
+            </p>
           </div>
           <p id="videoStatus" class="statusLine">Video status: scanning...</p>
         </section>
@@ -104,14 +142,21 @@
         <section class="card">
           <div class="cardHead">
             <h2>Detected Images</h2>
-            <button id="scanImagesButton" class="actionBtn" type="button">Scan Page</button>
+            <button id="scanImagesButton" class="actionBtn" type="button">
+              Scan Page
+            </button>
           </div>
-          <p class="hint">Finds images from page tags, lazy-load attributes, CSS backgrounds, and social preview metadata.</p>
+          <p class="hint">
+            Finds images from page tags, lazy-load attributes, CSS backgrounds,
+            and social preview metadata.
+          </p>
           <div class="grid imageFilters">
             <label>
               <span>Quick size preset</span>
               <select id="imageSizePresetSelect">
-                <option value="medium_plus">Bigger than 600px (recommended)</option>
+                <option value="medium_plus">
+                  Bigger than 600px (recommended)
+                </option>
                 <option value="large_plus">Bigger than 1200px</option>
                 <option value="small_only">Smaller than 600px</option>
                 <option value="all">All sizes</option>
@@ -155,11 +200,23 @@
             </label>
           </div>
           <div class="imageActions">
-            <button id="imageSelectAllButton" class="actionBtn" type="button">Select All</button>
-            <button id="imageSelectNoneButton" class="actionBtn" type="button">Clear Selection</button>
-            <button id="imageDownloadSelectedButton" class="actionBtn primary" type="button">Download Selected</button>
+            <button id="imageSelectAllButton" class="actionBtn" type="button">
+              Select All
+            </button>
+            <button id="imageSelectNoneButton" class="actionBtn" type="button">
+              Clear Selection
+            </button>
+            <button
+              id="imageDownloadSelectedButton"
+              class="actionBtn primary"
+              type="button"
+            >
+              Download Selected
+            </button>
           </div>
-          <p id="imagesStats" class="statusLine">0 images loaded, 0 selected.</p>
+          <p id="imagesStats" class="statusLine">
+            0 images loaded, 0 selected.
+          </p>
           <div id="imageList" class="imageList">
             <p class="hint">No images loaded. Click "Scan Page".</p>
           </div>
@@ -172,6 +229,26 @@
           <div class="cardHead">
             <h2>Capture Scope</h2>
           </div>
+          <div class="videoBridgeBar">
+            <label
+              class="toggleLabel consoleCaptureToggle"
+              for="consoleCaptureToggle"
+            >
+              <span>Console Recording</span>
+              <span class="toggleWrap">
+                <input id="consoleCaptureToggle" type="checkbox" />
+                <i class="toggleTrack"></i>
+                <strong id="consoleCaptureLabel">Not recording</strong>
+              </span>
+            </label>
+            <button id="clearConsoleLogsButton" class="actionBtn" type="button">
+              Clear Logs
+            </button>
+          </div>
+          <p id="consoleCaptureStatus" class="statusLine">
+            Console capture: idle. Toggle recording to start capturing logs
+            natively.
+          </p>
           <div class="scopeSwitch" role="radiogroup" aria-label="Log scope">
             <button
               class="scopeBtn is-active"
@@ -266,7 +343,8 @@
             <h2>AI Brief From Console</h2>
           </div>
           <p class="hint">
-            Uses the current Main capture and your configured provider settings to produce a concise debugging brief.
+            Uses the current Main capture and your configured provider settings
+            to produce a concise debugging brief.
           </p>
           <div class="aiActions">
             <button
@@ -293,10 +371,15 @@ AI brief will appear here after generation.</pre
             <h2>Page Context Pack</h2>
           </div>
           <p class="hint">
-            Scans rendered page content and key UI elements into an AI-ready handoff pack. Console logs are not used in this mode.
+            Scans rendered page content and key UI elements into an AI-ready
+            handoff pack. Console logs are not used in this mode.
           </p>
           <div class="contextActions">
-            <button id="extractContextButton" class="actionBtn primary" type="button">
+            <button
+              id="extractContextButton"
+              class="actionBtn primary"
+              type="button"
+            >
               Scan This Page
             </button>
             <button id="condenseContextButton" class="actionBtn" type="button">
@@ -333,10 +416,17 @@ AI condensed context will appear here after generation.</pre
           <div class="cardHead">
             <h2>SEO & Meta Overview</h2>
           </div>
-          <p class="hint">Scan page for SEO metadata, Open Graph, Twitter Cards, heading hierarchy, and image alt coverage.</p>
+          <p class="hint">
+            Scan page for SEO metadata, Open Graph, Twitter Cards, heading
+            hierarchy, and image alt coverage.
+          </p>
           <div class="seoActions">
-            <button id="scanSeoButton" class="actionBtn primary" type="button">Scan Page</button>
-            <button id="copySeoButton" class="actionBtn" type="button">Copy Report</button>
+            <button id="scanSeoButton" class="actionBtn primary" type="button">
+              Scan Page
+            </button>
+            <button id="copySeoButton" class="actionBtn" type="button">
+              Copy Report
+            </button>
           </div>
           <div id="seoResults" class="seoResults">
             <p class="hint">Click "Scan Page" to extract SEO metadata.</p>
@@ -351,15 +441,37 @@ AI condensed context will appear here after generation.</pre
             <h2>Structured Data</h2>
           </div>
           <div class="schemaActions">
-            <button id="scanSchemaButton" class="actionBtn primary" type="button">Scan Page</button>
-            <button id="testRichResultsButton" class="actionBtn" type="button">Test in Google</button>
-            <button id="copySchemaButton" class="actionBtn" type="button">Copy Data</button>
+            <button
+              id="scanSchemaButton"
+              class="actionBtn primary"
+              type="button"
+            >
+              Scan Page
+            </button>
+            <button id="testRichResultsButton" class="actionBtn" type="button">
+              Test in Google
+            </button>
+            <button id="copySchemaButton" class="actionBtn" type="button">
+              Copy Data
+            </button>
           </div>
-          <div class="stats" id="schemaStats" style="display: none;">
-            <article><p>Types</p><strong id="schemaStatTypes">0</strong></article>
-            <article><p>JSON-LD</p><strong id="schemaStatJsonLd">0</strong></article>
-            <article><p>Microdata</p><strong id="schemaStatMicrodata">0</strong></article>
-            <article><p>Warnings</p><strong id="schemaStatWarnings">0</strong></article>
+          <div class="stats" id="schemaStats" style="display: none">
+            <article>
+              <p>Types</p>
+              <strong id="schemaStatTypes">0</strong>
+            </article>
+            <article>
+              <p>JSON-LD</p>
+              <strong id="schemaStatJsonLd">0</strong>
+            </article>
+            <article>
+              <p>Microdata</p>
+              <strong id="schemaStatMicrodata">0</strong>
+            </article>
+            <article>
+              <p>Warnings</p>
+              <strong id="schemaStatWarnings">0</strong>
+            </article>
           </div>
           <div id="schemaResults" class="schemaResults">
             <p class="hint">Click "Scan Page" to extract structured data.</p>
@@ -376,35 +488,81 @@ AI condensed context will appear here after generation.</pre
           <div class="sitemapUrlInput">
             <label>
               <span>Sitemap URL</span>
-              <input id="sitemapUrlInput" type="text" placeholder="https://example.com/sitemap.xml" />
+              <input
+                id="sitemapUrlInput"
+                type="text"
+                placeholder="https://example.com/sitemap.xml"
+              />
             </label>
           </div>
           <div class="sitemapActions">
-            <button id="fetchSitemapButton" class="actionBtn primary" type="button">Fetch Sitemap</button>
-            <button id="copySitemapUrlsButton" class="actionBtn" type="button">Copy URLs</button>
-            <button id="downloadSitemapTextButton" class="actionBtn" type="button">Download Full Text</button>
-            <button id="downloadSitemapJsonButton" class="actionBtn" type="button">Download JSON</button>
+            <button
+              id="fetchSitemapButton"
+              class="actionBtn primary"
+              type="button"
+            >
+              Fetch Sitemap
+            </button>
+            <button id="copySitemapUrlsButton" class="actionBtn" type="button">
+              Copy URLs
+            </button>
+            <button
+              id="downloadSitemapTextButton"
+              class="actionBtn"
+              type="button"
+            >
+              Download Full Text
+            </button>
+            <button
+              id="downloadSitemapJsonButton"
+              class="actionBtn"
+              type="button"
+            >
+              Download JSON
+            </button>
           </div>
-          <div class="sitemapFilters" id="sitemapFilters" style="display: none;">
+          <div class="sitemapFilters" id="sitemapFilters" style="display: none">
             <div class="grid">
               <label>
                 <span>Search URLs</span>
-                <input id="sitemapSearchInput" type="text" placeholder="Filter by path..." />
+                <input
+                  id="sitemapSearchInput"
+                  type="text"
+                  placeholder="Filter by path..."
+                />
               </label>
               <label>
                 <span>Path pattern</span>
-                <input id="sitemapPatternInput" type="text" placeholder="/blog/*" />
+                <input
+                  id="sitemapPatternInput"
+                  type="text"
+                  placeholder="/blog/*"
+                />
               </label>
             </div>
           </div>
-          <div class="stats" id="sitemapStats" style="display: none;">
-            <article><p>Total URLs</p><strong id="sitemapStatTotal">0</strong></article>
-            <article><p>Filtered</p><strong id="sitemapStatFiltered">0</strong></article>
-            <article><p>Domains</p><strong id="sitemapStatDomains">0</strong></article>
-            <article><p>Date Range</p><strong id="sitemapStatDates">-</strong></article>
+          <div class="stats" id="sitemapStats" style="display: none">
+            <article>
+              <p>Total URLs</p>
+              <strong id="sitemapStatTotal">0</strong>
+            </article>
+            <article>
+              <p>Filtered</p>
+              <strong id="sitemapStatFiltered">0</strong>
+            </article>
+            <article>
+              <p>Domains</p>
+              <strong id="sitemapStatDomains">0</strong>
+            </article>
+            <article>
+              <p>Date Range</p>
+              <strong id="sitemapStatDates">-</strong>
+            </article>
           </div>
           <div id="sitemapResults" class="sitemapResults">
-            <p class="hint">Click "Fetch Sitemap" to discover and parse the sitemap.</p>
+            <p class="hint">
+              Click "Fetch Sitemap" to discover and parse the sitemap.
+            </p>
           </div>
           <p id="sitemapStatus" class="statusLine">Sitemap status: idle</p>
         </section>
@@ -446,7 +604,7 @@ AI condensed context will appear here after generation.</pre
               Clear
             </button>
           </div>
-          <div id="ollamaUrlSection" class="apiKeyRow" style="display: none;">
+          <div id="ollamaUrlSection" class="apiKeyRow" style="display: none">
             <input
               id="ollamaUrlInput"
               type="text"
@@ -467,7 +625,7 @@ AI condensed context will appear here after generation.</pre
                 class="inlineInput"
                 type="text"
                 placeholder="Enter model name"
-                style="display: none;"
+                style="display: none"
               />
             </label>
             <label>

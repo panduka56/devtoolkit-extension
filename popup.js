@@ -76,6 +76,12 @@ const settingsStatusEl = document.getElementById('settingsStatus');
 
 let currentProvider = 'deepseek';
 
+// === Console Capture DOM ===
+const consoleCaptureToggle = document.getElementById('consoleCaptureToggle');
+const consoleCaptureLabel = document.getElementById('consoleCaptureLabel');
+const consoleCaptureStatusEl = document.getElementById('consoleCaptureStatus');
+const clearConsoleLogsButton = document.getElementById('clearConsoleLogsButton');
+
 const statTotalEl = document.getElementById('statTotal');
 const statSelectedEl = document.getElementById('statSelected');
 const statUniqueEl = document.getElementById('statUnique');
@@ -888,9 +894,10 @@ function isNoReceiverError(error) {
   );
 }
 
-function buildRequestPayload(settings) {
+function buildRequestPayload(settings, tabId) {
   return {
     type: 'GET_CAPTURED_CONSOLE',
+    tabId,
     format: settings.format,
     levelPreset: settings.levelPreset,
     optimizeForAi: settings.optimizeForAi,
@@ -908,7 +915,7 @@ function buildContextRequestPayload() {
 
 async function sendReportRequest(tabId, settings) {
   const response = await withTimeout(
-    chrome.tabs.sendMessage(tabId, buildRequestPayload(settings)),
+    chrome.runtime.sendMessage(buildRequestPayload(settings, tabId)),
     5000
   );
   if (!response || !response.ok || typeof response.text !== 'string') {
@@ -960,22 +967,7 @@ async function getActiveTabOrThrow() {
 
 async function fetchReportFromActiveTab(settings) {
   const activeTab = await getActiveTabOrThrow();
-  try {
-    return await sendReportRequest(activeTab.id, settings);
-  } catch (error) {
-    if (!isNoReceiverError(error)) {
-      throw error;
-    }
-    try {
-      await ensureContentScriptLoaded(activeTab.id);
-      return await sendReportRequest(activeTab.id, settings);
-    } catch (injectError) {
-      throw new Error(
-        'Could not connect to this tab. Reload the tab once and try again.',
-        { cause: injectError }
-      );
-    }
-  }
+  return sendReportRequest(activeTab.id, settings);
 }
 
 async function fetchContextFromActiveTab() {
@@ -3310,6 +3302,58 @@ function bindEvents() {
   // Video panel
   downloadAllButton.addEventListener('click', downloadAllVideos);
 
+  // Console capture toggle
+  if (consoleCaptureToggle) {
+    consoleCaptureToggle.addEventListener('change', async () => {
+      try {
+        const activeTab = await getActiveTabOrThrow();
+        if (consoleCaptureToggle.checked) {
+          const result = await chrome.runtime.sendMessage({
+            type: 'START_CONSOLE_CAPTURE',
+            tabId: activeTab.id,
+          });
+          if (result?.ok) {
+            consoleCaptureLabel.textContent = 'Recording…';
+            consoleCaptureStatusEl.textContent = result.alreadyAttached
+              ? 'Console capture already active on this tab.'
+              : 'Console capture started. Logs accumulate in the background.';
+          } else {
+            consoleCaptureToggle.checked = false;
+            consoleCaptureLabel.textContent = 'Not recording';
+            consoleCaptureStatusEl.textContent = `Could not start: ${result?.error || 'unknown error'}`;
+          }
+        } else {
+          await chrome.runtime.sendMessage({
+            type: 'STOP_CONSOLE_CAPTURE',
+            tabId: activeTab.id,
+          });
+          consoleCaptureLabel.textContent = 'Not recording';
+          consoleCaptureStatusEl.textContent = 'Console capture stopped. Existing logs are preserved until cleared.';
+        }
+      } catch (err) {
+        consoleCaptureToggle.checked = false;
+        consoleCaptureLabel.textContent = 'Not recording';
+        consoleCaptureStatusEl.textContent = `Error: ${err.message}`;
+      }
+    });
+  }
+
+  if (clearConsoleLogsButton) {
+    clearConsoleLogsButton.addEventListener('click', async () => {
+      try {
+        const activeTab = await getActiveTabOrThrow();
+        await chrome.runtime.sendMessage({
+          type: 'CLEAR_CONSOLE_LOGS',
+          tabId: activeTab.id,
+        });
+        consoleCaptureStatusEl.textContent = 'Logs cleared.';
+        refreshPreview();
+      } catch (err) {
+        consoleCaptureStatusEl.textContent = `Could not clear: ${err.message}`;
+      }
+    });
+  }
+
   // Auto-refresh when switching tabs or navigating
   chrome.tabs.onActivated.addListener(() => {
     void refreshVideoList();
@@ -3343,6 +3387,25 @@ function bindEvents() {
   });
 }
 
+async function syncConsoleCaptureState() {
+  try {
+    const activeTab = await getActiveTabOrThrow();
+    const status = await chrome.runtime.sendMessage({
+      type: 'GET_CONSOLE_STATUS',
+      tabId: activeTab.id,
+    });
+    if (status?.ok && consoleCaptureToggle) {
+      consoleCaptureToggle.checked = status.capturing;
+      consoleCaptureLabel.textContent = status.capturing ? 'Recording…' : 'Not recording';
+      if (status.capturing) {
+        consoleCaptureStatusEl.textContent = `Capturing console logs (${status.logCount} so far).`;
+      }
+    }
+  } catch {
+    // Tab may be restricted; ignore.
+  }
+}
+
 // === Initialize ===
 
 async function initialize() {
@@ -3359,7 +3422,7 @@ async function initialize() {
     `Bridge: ${DEFAULT_LOCAL_HELPER_URL} • Folder: ${LOCAL_HELPER_SMB_URL}`
   );
   contextAiTextEl.textContent = 'AI condensed context will appear here after generation.';
-  await Promise.all([refreshPreview(), loadAiConfig(), refreshVideoList(), refreshImageList()]);
+  await Promise.all([refreshPreview(), loadAiConfig(), refreshVideoList(), refreshImageList(), syncConsoleCaptureState()]);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
